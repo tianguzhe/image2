@@ -1,0 +1,99 @@
+/* Gallery area */
+.gallery-area {
+  flex: 1; overflow-y: auto; padding: 28px;
+  position: relative;
+  /* 純白畫廊區 */
+  background: rgba(255,255,255,0.88);
+  animation: fadeIn 0.9s ease 0.15s both;
+}
+@keyframes fadeIn { from { opacity: 0; } to { opacity: 1; } }
+.gallery-header {
+  display: flex; justify-content: space-between; align-items: center;
+  margin-bottom: 18px; position: sticky; top: 0;
+  background: linear-gradient(180deg, var(--bg) 62%, transparent);
+  padding-bottom: 14px; z-index: 10;
+}
+.gallery-header-left { display: flex; align-items: baseline; gap: 12px; }
+.gallery-header-left h2 {
+  font-family: var(--font-heading);
+  font-size: 26px; font-weight: 700; letter-spacing: -0.01em; color: var(--ink);
+}
+.gallery-count { color: var(--text-tertiary); font-size: 12px; }
+.gallery-filter { display: flex; gap: 4px; }
+.gallery-filter button {
+  padding: 5px 14px; border-radius: 100px; font-size: 12px;
+  font-family: inherit; cursor: pointer;
+  border: 1px solid var(--border); background: rgba(255,255,255,0.8);
+  color: var(--text-tertiary); transition: all var(--transition);
+}
+.gallery-filter button:hover { color: var(--text-secondary); border-color: var(--border-hover); background: #fff; }
+.gallery-filter button.active { color: #fff; background: var(--ink); border-color: var(--ink); }
+.gallery-sort-btn {
+  padding: 5px 12px; border-radius: 100px; font-size: 11px;
+  font-family: inherit; cursor: pointer;
+  border: 1px solid var(--border); background: rgba(255,255,255,0.8);
+  color: var(--text-tertiary); transition: all var(--transition); white-space: nowrap;
+}
+.gallery-sort-btn:hover { color: var(--text-secondary); border-color: var(--border-hover); background: #fff; }
+.gallery-actions-right { display: flex; gap: 8px; align-items: center; }
+.gallery-grid { display: flex; gap: 12px; }
+.gallery-col { flex: 1; display: flex; flex-direction: column; gap: 12px; min-width: 0; }
+@media (min-width: 1400px) { .gallery-grid { --gallery-cols: 3; } }
+@media (min-width: 1800px) { .gallery-grid { --gallery-cols: 4; } }
+
+.gallery-item {
+  position: relative; border-radius: var(--radius-lg);
+  overflow: hidden; border: 1px solid var(--border);
+  cursor: pointer; background: var(--surface-2);
+  box-shadow: var(--shadow-sm);
+  transition: all var(--transition);
+  animation: itemIn 0.6s cubic-bezier(.19,.72,.38,1) both;
+}
+@keyframes itemIn {
+  from { opacity: 0; transform: translateY(12px) scale(0.96); }
+  to { opacity: 1; transform: translateY(0) scale(1); }
+}
+.gallery-item:hover, .gallery-item:focus-visible {
+  border-color: var(--border-hover); outline: none;
+  transform: translateY(-4px) scale(1.01);
+  box-shadow: var(--shadow-lg);
+}
+.gallery-item img { display: block; width: 100%; }
+.gallery-overlay {
+  position: absolute; inset: 0;
+  background: linear-gradient(transparent 38%, rgba(26,22,18,0.86));
+  opacity: 0; transition: opacity var(--transition);
+  display: flex; flex-direction: column; justify-content: flex-end;
+  padding: 12px;
+}
+.gallery-item:hover .gallery-overlay, .gallery-item:focus-visible .gallery-overlay { opacity: 1; }
+.gallery-overlay .prompt-preview {
+  font-size: 11px; color: #e8e0d0; line-height: 1.5;
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+}
+.gallery-overlay .meta-row {
+  display: flex; justify-content: space-between; align-items: center; margin-top: 7px;
+}
+.gallery-overlay .meta-row .time { font-size: 10px; color: rgba(243,237,223,0.5); }
+.gallery-overlay .meta-row a {
+  padding: 3px 9px; border-radius: var(--radius); font-size: 10px;
+  background: rgba(243,237,223,0.16); color: #fff; text-decoration: none;
+  transition: background var(--transition);
+}
+.gallery-overlay .meta-row a:hover { background: rgba(243,237,223,0.32); }
+.gallery-overlay .meta-actions { display: flex; gap: 4px; flex-wrap: wrap; justify-content: flex-end; }
+.gallery-overlay .meta-actions button {
+  padding: 3px 9px; border-radius: var(--radius); font-size: 10px;
+  background: rgba(243,237,223,0.16); color: #fff; border: none;
+  cursor: pointer; font-family: inherit; transition: background var(--transition);
+}
+.gallery-overlay .meta-actions button:hover { background: rgba(243,237,223,0.32); }
+.gallery-del-btn, .lightbox-del-btn { background: rgba(214,52,71,0.34) !important; color: #ffd9d3 !important; }
+.gallery-del-btn:hover, .lightbox-del-btn:hover { background: rgba(214,52,71,0.6) !important; }
+.gallery-chat-btn { background: rgba(214,52,71,0.6) !important; color: #fff !important; font-weight: 600; }
+.gallery-chat-btn:hover { background: rgba(214,52,71,0.82) !important; }
+.gallery-empty {
+  display: flex; align-items: center; justify-content: center;
+  height: 100%; color: var(--text-tertiary); font-size: 14px;
+  letter-spacing: 0.06em;
+}
