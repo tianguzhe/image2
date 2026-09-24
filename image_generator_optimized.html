@@ -652,7 +652,7 @@ input[type="file"]::file-selector-button:hover { border-color: var(--border-hove
           <span class="seal" aria-hidden="true">墨</span>
           <div class="brand-text">
             <h1>墨境工坊</h1>
-            <p>gpt-image-2 · 視覺煉金實驗室</p>
+            <p>gpt-image-2.5-sunburst · 視覺煉金實驗室</p>
           </div>
         </div>
       </div>
@@ -918,6 +918,7 @@ const API_TIMEOUT_MS = 300000; // 5 minutes
 const MAX_B64_LENGTH = 50 * 1024 * 1024; // 50MB
 const MAX_IMAGES_PER_ITEM = 20;
 const BATCH_SIZE = 20;
+const IMAGE_MODEL = 'gpt-image-2.5-sunburst';
 
 // Validation constants
 const VALID_FORMATS = ['png', 'jpeg', 'webp'];
@@ -1062,41 +1063,13 @@ async function addToHistory(type, prompt, images, fmt) {
   try {
     const db = await openDB();
     const id = Date.now();
-    const ext = fmt === 'jpeg' ? 'jpg' : fmt || 'png';
     const time = new Date().toLocaleString('zh-TW');
-
+    const item = { id, type, prompt, fmt, time };
     if (useLocalFS && dirHandle) {
-      const mime = fmt === 'jpeg' ? 'image/jpeg' : fmt === 'webp' ? 'image/webp' : 'image/png';
-      const filenames = [];
-      for (let i = 0; i < images.length; i++) {
-        const img = images[i];
-        const fname = `${id}_${i}.${ext}`;
-        if (img.b64_json) {
-          const binary = Uint8Array.from(atob(img.b64_json), c => c.charCodeAt(0));
-          const fh = await dirHandle.getFileHandle(fname, { create: true });
-          const writable = await fh.createWritable();
-          await writable.write(binary);
-          await writable.close();
-        } else if (img.url) {
-          const resp = await fetch(img.url);
-          const blob = await resp.blob();
-          const fh = await dirHandle.getFileHandle(fname, { create: true });
-          const writable = await fh.createWritable();
-          await writable.write(blob);
-          await writable.close();
-        }
-        filenames.push(fname);
-      }
-      const item = { id, type, prompt, filenames, fmt, time };
-      return new Promise((resolve, reject) => {
-        const tx = db.transaction(DB_STORE, 'readwrite');
-        tx.objectStore(DB_STORE).add(item);
-        tx.oncomplete = () => { renderGallery(); resolve(); };
-        tx.onerror = () => reject(tx.error);
-      });
+      item.filenames = await persistImages(images, fmt, String(id));
+    } else {
+      item.images = images;
     }
-
-    const item = { id, type, prompt, images, fmt, time };
     return new Promise((resolve, reject) => {
       const tx = db.transaction(DB_STORE, 'readwrite');
       tx.objectStore(DB_STORE).add(item);
@@ -1131,7 +1104,10 @@ async function deleteHistoryItem(id) {
     return new Promise((resolve, reject) => {
       const tx = db.transaction(DB_STORE, 'readwrite');
       tx.objectStore(DB_STORE).delete(id);
-      tx.oncomplete = () => { renderGallery(); resolve(); };
+      tx.oncomplete = () => {
+        invalidateGalleryCache(id);
+        renderGallery().then(resolve, reject);
+      };
       tx.onerror = () => reject(tx.error);
     });
   } catch (e) {
@@ -1172,7 +1148,8 @@ async function deleteSingleImage(historyId, imageIndex) {
       tx.oncomplete = resolve;
       tx.onerror = () => reject(tx.error);
     });
-    renderGallery();
+    invalidateGalleryCache(historyId);
+    await renderGallery();
   } catch (e) {
     console.error('deleteSingleImage failed:', e);
     showError('刪除失敗');
@@ -1296,28 +1273,7 @@ async function migrateToFileSystem() {
     const item = toMigrate[mi];
     showLoading(`正在遷移 ${mi + 1}/${toMigrate.length} 筆...`);
     try {
-      const ext = item.fmt === 'jpeg' ? 'jpg' : item.fmt || 'png';
-      const mime = item.fmt === 'jpeg' ? 'image/jpeg' : item.fmt === 'webp' ? 'image/webp' : 'image/png';
-      const filenames = [];
-      for (let i = 0; i < item.images.length; i++) {
-        const img = item.images[i];
-        const fname = `${item.id}_${i}.${ext}`;
-        if (img.b64_json) {
-          const binary = Uint8Array.from(atob(img.b64_json), c => c.charCodeAt(0));
-          const fh = await dirHandle.getFileHandle(fname, { create: true });
-          const writable = await fh.createWritable();
-          await writable.write(binary);
-          await writable.close();
-        } else if (img.url) {
-          const resp = await fetch(img.url);
-          const blob = await resp.blob();
-          const fh = await dirHandle.getFileHandle(fname, { create: true });
-          const writable = await fh.createWritable();
-          await writable.write(blob);
-          await writable.close();
-        }
-        filenames.push(fname);
-      }
+      const filenames = await persistImages(item.images, item.fmt, String(item.id));
       const updated = { id: item.id, type: item.type, prompt: item.prompt, filenames, fmt: item.fmt, time: item.time };
       await new Promise((resolve, reject) => {
         const tx = db.transaction(DB_STORE, 'readwrite');
@@ -1383,9 +1339,40 @@ function sanitizeUrl(url) {
   } catch {}
   return '';
 }
+// ===== Shared image helpers =====
+function imageExtension(fmt) {
+  return fmt === 'jpeg' ? 'jpg' : fmt || 'png';
+}
+function imageMimeType(fmt) {
+  return fmt === 'jpeg' ? 'image/jpeg' : fmt === 'webp' ? 'image/webp' : 'image/png';
+}
+function base64ToBytes(b64) {
+  return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+}
 function b64ToObjectUrl(b64, mime) {
-  const bytes = Uint8Array.from(atob(b64), c => c.charCodeAt(0));
-  return URL.createObjectURL(new Blob([bytes], { type: mime }));
+  return URL.createObjectURL(new Blob([base64ToBytes(b64)], { type: mime }));
+}
+async function writeLocalFile(filename, contents) {
+  const handle = await dirHandle.getFileHandle(filename, { create: true });
+  const writable = await handle.createWritable();
+  await writable.write(contents);
+  await writable.close();
+}
+async function persistImages(images, fmt, prefix) {
+  const ext = imageExtension(fmt);
+  const filenames = [];
+  for (let i = 0; i < images.length; i++) {
+    const img = images[i];
+    const filename = `${prefix}_${i}.${ext}`;
+    if (img.b64_json) {
+      await writeLocalFile(filename, base64ToBytes(img.b64_json));
+    } else if (img.url) {
+      const response = await fetch(img.url);
+      await writeLocalFile(filename, await response.blob());
+    }
+    filenames.push(filename);
+  }
+  return filenames;
 }
 function formatBytes(bytes) {
   if (bytes < 1024) return bytes + ' B';
@@ -1441,6 +1428,15 @@ let gallerySortAsc = false;
 let galleryFlatList = [];
 let lightboxIndex = -1;
 
+function invalidateGalleryCache(historyId) {
+  const prefix = `${historyId}_`;
+  for (const [key, url] of blobUrlCache) {
+    if (!key.startsWith(prefix)) continue;
+    URL.revokeObjectURL(url);
+    blobUrlCache.delete(key);
+  }
+}
+
 async function renderGallery() {
   const list = await loadHistory();
   const grid = document.getElementById('galleryGrid');
@@ -1457,7 +1453,7 @@ async function renderGallery() {
   // base64 decodes happen only once per image.
   const liveKeys = new Set();
   for (const item of list) {
-    const ext = item.fmt === 'jpeg' ? 'jpg' : item.fmt || 'png';
+    const ext = imageExtension(item.fmt);
     if (item.filenames) {
       for (const f of item.filenames) liveKeys.add(f);
     } else if (item.images) {
@@ -1470,8 +1466,8 @@ async function renderGallery() {
 
   const entries = [];
   for (const item of filtered) {
-    const mime = item.fmt === 'jpeg' ? 'image/jpeg' : item.fmt === 'webp' ? 'image/webp' : 'image/png';
-    const ext = item.fmt === 'jpeg' ? 'jpg' : item.fmt || 'png';
+    const mime = imageMimeType(item.fmt);
+    const ext = imageExtension(item.fmt);
 
     if (item.filenames) {
       for (let i = 0; i < item.filenames.length; i++) {
@@ -1695,6 +1691,13 @@ function setupDropZone(zoneId, fileInputId, previewId, textId, fileArr, multi) {
   const input = document.getElementById(fileInputId);
   const preview = document.getElementById(previewId);
   const text = document.getElementById(textId);
+  const previewUrls = new Map();
+
+  function releasePreviewUrls() {
+    previewUrls.forEach(url => URL.revokeObjectURL(url));
+    previewUrls.clear();
+  }
+  window.addEventListener('beforeunload', releasePreviewUrls);
 
   function addFiles(newFiles) {
     for (const f of newFiles) {
@@ -1707,13 +1710,21 @@ function setupDropZone(zoneId, fileInputId, previewId, textId, fileArr, multi) {
 
   function renderPreviews() {
     preview.innerHTML = '';
+    // Reuse URLs for retained files; release removed/replaced previews.
+    const retainedFiles = new Set(fileArr);
+    for (const [file, url] of previewUrls) {
+      if (retainedFiles.has(file)) continue;
+      URL.revokeObjectURL(url);
+      previewUrls.delete(file);
+    }
     if (fileArr.length) {
       text.style.display = 'none';
       fileArr.forEach((f, i) => {
         const wrap = document.createElement('span');
         wrap.className = 'thumb-wrap';
         const img = document.createElement('img');
-        img.src = URL.createObjectURL(f);
+        if (!previewUrls.has(f)) previewUrls.set(f, URL.createObjectURL(f));
+        img.src = previewUrls.get(f);
         const btn = document.createElement('button');
         btn.className = 'thumb-remove';
         btn.textContent = '×';
@@ -1794,14 +1805,18 @@ function getHeaders() {
   if (key) h['Authorization'] = `Bearer ${key}`;
   return h;
 }
-function getSize() {
-  const v = document.getElementById('size').value;
+function getSize(sizeId = 'size', customSizeId = 'customSize') {
+  const v = document.getElementById(sizeId).value;
   if (v === 'custom') {
-    const c = document.getElementById('customSize').value.trim();
+    const c = document.getElementById(customSizeId).value.trim();
     if (!/^\d+x\d+$/.test(c)) { alert('自訂尺寸格式錯誤，請用 寬x高'); return null; }
     return c;
   }
   return v;
+}
+function getPartialImageCount() {
+  const count = Number(document.getElementById('partials').value);
+  return Number.isInteger(count) && count >= 0 && count <= 3 ? count : 0;
 }
 function showLoading(msg) {
   const el = document.getElementById('status');
@@ -1837,7 +1852,8 @@ async function callGenerateAPI(body, signal) {
       signal: fetchSignal
     });
     if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-    return res.json();
+    // Keep the timeout active until the response body has finished downloading.
+    return await res.json();
   } catch (e) {
     // Internal timeout only; external aborts propagate as AbortError for the caller
     if (e.name === 'AbortError' && !signal) throw new Error('請求超時（超過5分鐘），請稍後重試');
@@ -1898,20 +1914,26 @@ async function readImageEventStream(res, onPartial) {
     else if (onPartial) onPartial(b64, idx);
   };
 
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-    let splitAt;
-    while ((splitAt = buffer.indexOf('\n\n')) !== -1) {
-      processBlock(buffer.slice(0, splitAt));
-      buffer = buffer.slice(splitAt + 2);
+  try {
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+      // SSE proxies may use LF or CRLF, including delimiters split across chunks.
+      let separator;
+      while ((separator = /\r?\n\r?\n/.exec(buffer)) !== null) {
+        processBlock(buffer.slice(0, separator.index));
+        buffer = buffer.slice(separator.index + separator[0].length);
+      }
     }
+    buffer += decoder.decode();
+    if (buffer.trim()) processBlock(buffer);
+    if (streamError) throw streamError;
+    if (!finalImages.length) throw new Error('串流結束但沒有收到最終圖片');
+    return { data: finalImages };
+  } finally {
+    reader.releaseLock();
   }
-  if (buffer.trim()) processBlock(buffer);
-  if (streamError) throw streamError;
-  if (!finalImages.length) throw new Error('串流結束但沒有收到最終圖片');
-  return { data: finalImages };
 }
 
 async function callGenerateAPIStream(body, { signal, onPartial } = {}) {
@@ -1921,11 +1943,7 @@ async function callGenerateAPIStream(body, { signal, onPartial } = {}) {
   const res = await fetch(`${base}/images/generations`, {
     method: 'POST', headers, body: JSON.stringify(body), signal
   });
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
-  const contentType = res.headers.get('content-type') || '';
-  // Graceful fallback: proxy ignored stream:true and returned plain JSON
-  if (!contentType.includes('text/event-stream')) return res.json();
-  return readImageEventStream(res, onPartial);
+  return readImageAPIResponse(res, onPartial);
 }
 
 // Streaming edits via fetch (no Content-Type header: the browser sets the
@@ -1939,8 +1957,13 @@ async function callEditAPIStream(formData, { signal, onPartial } = {}) {
   const res = await fetch(`${base}/images/edits`, {
     method: 'POST', headers, body: formData, signal
   });
+  return readImageAPIResponse(res, onPartial);
+}
+
+async function readImageAPIResponse(res, onPartial) {
   if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
   const contentType = res.headers.get('content-type') || '';
+  // Proxies may ignore stream:true and return plain JSON.
   if (!contentType.includes('text/event-stream')) return res.json();
   return readImageEventStream(res, onPartial);
 }
@@ -1981,7 +2004,7 @@ function hideStreamPreview() {
 }
 function showStreamPartial(b64, fmt) {
   try {
-    const mime = fmt === 'jpeg' ? 'image/jpeg' : fmt === 'webp' ? 'image/webp' : 'image/png';
+    const mime = imageMimeType(fmt);
     // Object URL instead of data: URL — avoids holding a second base64 copy in the DOM
     if (streamObjectUrl) URL.revokeObjectURL(streamObjectUrl);
     streamObjectUrl = b64ToObjectUrl(b64, mime);
@@ -1994,6 +2017,12 @@ function showStreamPartial(b64, fmt) {
 }
 function callEditAPI(formData, onProgress, signal) {
   return new Promise((resolve, reject) => {
+    if (signal?.aborted) {
+      const error = new Error('Aborted');
+      error.name = 'AbortError';
+      reject(error);
+      return;
+    }
     const base = getBaseUrl();
     const xhr = new XMLHttpRequest();
     xhr.open('POST', `${base}/images/edits`);
@@ -2036,13 +2065,13 @@ async function generate() {
   if (!size) return;
   const quality = document.getElementById('quality').value;
   const fmt = document.getElementById('format').value;
-  const partials = parseInt(document.getElementById('partials').value || '0', 10);
+  const partials = getPartialImageCount();
   // Single image per request by design; SSE streaming is the primary path
   const useStream = partials > 0;
   const btn = document.getElementById('generateBtn');
   const stopBtn = document.getElementById('stopGenBtn');
 
-  const body = { model: 'gpt-image-2', prompt, n: 1 };
+  const body = { model: IMAGE_MODEL, prompt, n: 1 };
   if (size !== 'auto') body.size = size;
   if (quality !== 'auto') body.quality = quality;
   if (fmt !== 'png') {
@@ -2106,20 +2135,18 @@ async function generate() {
 
 // ===== Edit =====
 async function editImage() {
+  const btn = document.getElementById('editBtn');
+  if (btn.disabled) return;
   const prompt = document.getElementById('editPrompt').value.trim();
   if (!prompt) { alert('請輸入編輯提示詞'); return; }
   if (!editFiles.length) { alert('請上傳至少一張圖片'); return; }
-  let size = document.getElementById('editSize').value;
-  if (size === 'custom') {
-    size = document.getElementById('editCustomSize').value.trim();
-    if (!/^\d+x\d+$/.test(size)) { alert('自訂尺寸格式錯誤，請用 寬x高'); return; }
-  }
+  const size = getSize('editSize', 'editCustomSize');
+  if (!size) return;
   const quality = document.getElementById('editQuality').value;
   const fmt = document.getElementById('editFormat').value;
-  const btn = document.getElementById('editBtn');
 
   const formData = new FormData();
-  formData.append('model', 'gpt-image-2');
+  formData.append('model', IMAGE_MODEL);
   formData.append('prompt', prompt);
   formData.append('n', '1');
   if (size !== 'auto') formData.append('size', size);
@@ -2288,17 +2315,13 @@ async function importAll(input) {
       let item = sanitizeHistoryItem(raw);
 
       if (useLocalFS && dirHandle && item.images) {
-        const ext = item.fmt === 'jpeg' ? 'jpg' : item.fmt || 'png';
+        const ext = imageExtension(item.fmt);
         const filenames = [];
         for (let i = 0; i < item.images.length; i++) {
           const img = item.images[i];
           if (!img.b64_json) continue;
           const fname = `${item.id}_${i}.${ext}`;
-          const binary = Uint8Array.from(atob(img.b64_json), c => c.charCodeAt(0));
-          const fh = await dirHandle.getFileHandle(fname, { create: true });
-          const writable = await fh.createWritable();
-          await writable.write(binary);
-          await writable.close();
+          await writeLocalFile(fname, base64ToBytes(img.b64_json));
           filenames.push(fname);
         }
         item = { id: item.id, type: item.type, prompt: item.prompt, filenames, fmt: item.fmt, time: item.time };
@@ -2309,6 +2332,7 @@ async function importAll(input) {
         tx.oncomplete = resolve;
         tx.onerror = () => reject(tx.error);
       });
+      invalidateGalleryCache(item.id);
       imported++;
     }
     renderGallery();
@@ -2331,6 +2355,7 @@ let chatDeleting = false;
 let chatController = null;    // in-flight chat request; null when idle
 let chatUserStopped = false;  // distinguishes user stop from timeout on AbortError
 let chatPartialUrl = null;    // partial preview blob URL for the temp bubble
+let chatRenderVersion = 0;
 const chatBlobCache = new Map();   // fname -> object URL (FS mode), revoked on unload
 
 // Temporary streaming bubble at the end of the chat; not part of activeConv,
@@ -2346,7 +2371,7 @@ function showChatPartial(b64, fmt) {
       card.innerHTML = '<span class="chat-seed-tag">串流中…</span><div class="chat-img-card"><img alt=""></div>';
       messages.appendChild(card);
     }
-    const mime = fmt === 'jpeg' ? 'image/jpeg' : fmt === 'webp' ? 'image/webp' : 'image/png';
+    const mime = imageMimeType(fmt);
     if (chatPartialUrl) URL.revokeObjectURL(chatPartialUrl);
     chatPartialUrl = b64ToObjectUrl(b64, mime);
     card.querySelector('img').src = chatPartialUrl;
@@ -2453,7 +2478,7 @@ async function turnImageSrc(turn) {
   }
   if (turn.images && turn.images.length) {
     const img = turn.images[0];
-    const mime = turn.fmt === 'jpeg' ? 'image/jpeg' : turn.fmt === 'webp' ? 'image/webp' : 'image/png';
+    const mime = imageMimeType(turn.fmt);
     return sanitizeUrl(img.url || `data:${mime};base64,${img.b64_json}`);
   }
   return '';
@@ -2462,29 +2487,13 @@ async function turnImageSrc(turn) {
 async function srcToFile(src, fmt) {
   const resp = await fetch(src);
   const blob = await resp.blob();
-  const ext = fmt === 'jpeg' ? 'jpg' : fmt || 'png';
+  const ext = imageExtension(fmt);
   return new File([blob], `input.${ext}`, { type: blob.type || 'image/png' });
 }
 // In FS mode, persist returned images to the local folder and return filenames; else null
 async function persistTurnImages(convId, turnIdx, images, fmt) {
   if (!(useLocalFS && dirHandle)) return null;
-  const ext = fmt === 'jpeg' ? 'jpg' : fmt || 'png';
-  const filenames = [];
-  for (let i = 0; i < images.length; i++) {
-    const img = images[i];
-    const fname = `conv_${convId}_${turnIdx}_${i}.${ext}`;
-    if (img.b64_json) {
-      const binary = Uint8Array.from(atob(img.b64_json), c => c.charCodeAt(0));
-      const fh = await dirHandle.getFileHandle(fname, { create: true });
-      const w = await fh.createWritable(); await w.write(binary); await w.close();
-    } else if (img.url) {
-      const r = await fetch(img.url); const b = await r.blob();
-      const fh = await dirHandle.getFileHandle(fname, { create: true });
-      const w = await fh.createWritable(); await w.write(b); await w.close();
-    }
-    filenames.push(fname);
-  }
-  return filenames;
+  return persistImages(images, fmt, `conv_${convId}_${turnIdx}`);
 }
 function latestImageTurn(conv) {
   if (!conv) return null;
@@ -2536,10 +2545,9 @@ async function startChatFromImage(item) {
   try {
     if (useLocalFS && dirHandle) {
       const file = await srcToFile(item.src, fmt);
-      const ext = fmt === 'jpeg' ? 'jpg' : fmt;
+      const ext = imageExtension(fmt);
       const fname = `conv_${now}_0_0.${ext}`;
-      const fh = await dirHandle.getFileHandle(fname, { create: true });
-      const w = await fh.createWritable(); await w.write(file); await w.close();
+      await writeLocalFile(fname, file);
       filenames = [fname];
     } else {
       const resp = await fetch(item.src);
@@ -2610,7 +2618,7 @@ async function sendChatTurn() {
   const hasImage = !!seedTurn;
   const fmt = 'png';
   // Same streaming preference as the generate tab
-  const partials = parseInt(document.getElementById('partials').value || '0', 10);
+  const partials = getPartialImageCount();
   chatBusy = true;
   chatUserStopped = false;
   chatController = new AbortController();
@@ -2623,20 +2631,26 @@ async function sendChatTurn() {
     const time = new Date().toLocaleString('zh-TW');
     activeConv = { id: now, title: prompt.slice(0, 24), time, createdAt: now, updatedAt: now, turns: [] };
   }
-  activeConv.turns.push({ kind: 'user', prompt, time: new Date().toLocaleString('zh-TW') });
+  // The request belongs to this conversation even if the user opens a new one.
+  const conversation = activeConv;
+  conversation.turns.push({ kind: 'user', prompt, time: new Date().toLocaleString('zh-TW') });
   renderChat();
   input.value = '';
 
   try {
     let data;
-    const onPartial = (b64) => { showChatStatus('串流中…'); showChatPartial(b64, fmt); };
+    const onPartial = (b64) => {
+      if (activeConv !== conversation) return;
+      showChatStatus('串流中…');
+      showChatPartial(b64, fmt);
+    };
     if (hasImage) {
       showChatStatus('微調中...');
       const src = await turnImageSrc(seedTurn);
       if (!src) throw new Error('找不到可用的輸入圖片');
       const file = await srcToFile(src, seedTurn.fmt || 'png');
       const formData = new FormData();
-      formData.append('model', 'gpt-image-2');
+      formData.append('model', IMAGE_MODEL);
       formData.append('prompt', prompt);
       formData.append('n', '1');
       formData.append('image[]', file);
@@ -2646,12 +2660,14 @@ async function sendChatTurn() {
         data = await callEditAPIStream(formData, { signal: chatController.signal, onPartial });
       } else {
         data = await callEditAPI(formData,
-          (pct) => showChatStatus(pct < 100 ? `上傳中 ${pct}%...` : '生成中...'),
+          (pct) => {
+            if (activeConv === conversation) showChatStatus(pct < 100 ? `上傳中 ${pct}%...` : '生成中...');
+          },
           chatController.signal);
       }
     } else {
       showChatStatus(partials > 0 ? '串流生成中...' : '生成中...');
-      const body = { model: 'gpt-image-2', prompt, n: 1 };
+      const body = { model: IMAGE_MODEL, prompt, n: 1 };
       if (partials > 0) {
         body.stream = true;
         body.partial_images = partials;
@@ -2664,18 +2680,24 @@ async function sendChatTurn() {
       throw new Error('回應中沒有圖片資料');
     }
     const images = data.data;
-    const turnIdx = activeConv.turns.length;
-    const filenames = await persistTurnImages(activeConv.id, turnIdx, images, fmt);
-    activeConv.turns.push({
+    const turnIdx = conversation.turns.length;
+    const filenames = await persistTurnImages(conversation.id, turnIdx, images, fmt);
+    conversation.turns.push({
       kind: hasImage ? 'edit' : 'generate', prompt,
       images: filenames ? null : images, filenames, fmt,
       time: new Date().toLocaleString('zh-TW')
     });
-    activeConv.updatedAt = Date.now();
-    await saveConversation(activeConv);
-    showChatStatus('');
-    renderChat();
+    conversation.updatedAt = Date.now();
+    await saveConversation(conversation);
+    if (activeConv === conversation) {
+      showChatStatus('');
+      renderChat();
+    }
   } catch (e) {
+    if (activeConv !== conversation) {
+      console.error('sendChatTurn failed for conversation', conversation.id, e);
+      return;
+    }
     if (e.name === 'AbortError') {
       if (chatUserStopped) showChatStatus('已停止');
       else showChatStatus('請求超時（超過5分鐘），請稍後重試', true);
@@ -2702,20 +2724,23 @@ function showChatStatus(msg, isError) {
 
 // ---- rendering ----
 async function renderChat() {
+  const version = ++chatRenderVersion;
+  const conversation = activeConv;
   const titleEl = document.getElementById('chatTitle');
   const messages = document.getElementById('chatMessages');
   const delBtn = document.getElementById('chatDelBtn');
   if (!messages) return;
-  titleEl.textContent = activeConv ? (activeConv.title || '對話') : '新對話';
-  delBtn.style.display = activeConv ? '' : 'none';
+  titleEl.textContent = conversation ? (conversation.title || '對話') : '新對話';
+  delBtn.style.display = conversation ? '' : 'none';
 
-  if (!activeConv || !activeConv.turns.length) {
+  if (!conversation || !conversation.turns.length) {
     messages.innerHTML = `<div class="chat-empty">從畫廊任一張圖點「對話微調」，<br>或在下方直接輸入提示詞開始。<br><br>之後每一輪都會以上一張圖為基礎，連續修改。</div>`;
     return;
   }
   messages.innerHTML = '';
-  for (let i = 0; i < activeConv.turns.length; i++) {
-    const turn = activeConv.turns[i];
+  const turns = [...conversation.turns];
+  for (let i = 0; i < turns.length; i++) {
+    const turn = turns[i];
     if (turn.kind === 'user') {
       const div = document.createElement('div');
       div.className = 'chat-msg user';
@@ -2724,7 +2749,8 @@ async function renderChat() {
       continue;
     }
     const src = await turnImageSrc(turn);
-    const ext = turn.fmt === 'jpeg' ? 'jpg' : turn.fmt || 'png';
+    if (version !== chatRenderVersion || activeConv !== conversation) return;
+    const ext = imageExtension(turn.fmt);
     const safeSrc = escapeHtml(src);
     const div = document.createElement('div');
     div.className = 'chat-msg image';
@@ -2733,7 +2759,7 @@ async function renderChat() {
         ? `<img src="${safeSrc}" alt="" loading="lazy">`
         : '<div style="padding:24px;color:var(--text-tertiary);font-size:12px;">圖片已遺失</div>'}</div>
       <div class="chat-img-actions">
-        ${src ? `<a href="${safeSrc}" download="chat_${activeConv.id}_${i}.${ext}">下載</a>` : ''}
+        ${src ? `<a href="${safeSrc}" download="chat_${conversation.id}_${i}.${ext}">下載</a>` : ''}
         ${turn.prompt ? `<button data-chat-copy-idx="${i}">複製提示詞</button>` : ''}
       </div>`;
     messages.appendChild(div);
