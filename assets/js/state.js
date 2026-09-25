@@ -13,12 +13,14 @@ let gallerySortAsc = false;
 let galleryFlatList = [];
 let lightboxIndex = -1;
 let galleryResizeTimer = null;
+let galleryRenderVersion = 0;
 
 // Generation and upload inputs
 let editFiles = [];
 let maskFiles = [];
 let genController = null;
 let genUserStopped = false;
+let editController = null;
 let streamObjectUrl = null;
 
 // Conversation and its current request

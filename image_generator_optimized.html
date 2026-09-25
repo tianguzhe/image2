@@ -45,8 +45,8 @@
 
       <div id="tab-generate" class="tab-content active">
         <div class="form-group">
-          <label for="prompt">提示詞</label>
-          <textarea id="prompt" placeholder="一隻在星空下奔跑的白色柴犬，水彩風格"></textarea>
+          <label for="prompt">提示詞 <span class="hint">（用途、主體、構圖、光線、限制）</span></label>
+          <textarea id="prompt" placeholder="水彩插畫：一隻白色柴犬在星空下的草原奔跑，側面全身，遠景低角度，冷藍夜色帶暖色星光。要出現的文字用引號標明，例如標題「夜行」；不要其他文字或浮水印"></textarea>
         </div>
         <div class="row">
           <div class="form-group">
@@ -56,11 +56,11 @@
               <option value="1024x1024" selected>1024×1024（正方形）</option>
               <option value="1536x1024">1536×1024（橫向）</option>
               <option value="1024x1536">1024×1536（直向）</option>
-              <option value="2048x2048">2048×2048（2K 正方形）</option>
+              <option value="2048x2048">2048×2048（2K 正方形，實驗性）</option>
               <option value="2048x1152">2048×1152（2K 橫向）</option>
               <option value="1152x2048">1152×2048（2K 直向）</option>
-              <option value="3840x2160">3840×2160（4K 橫向）</option>
-              <option value="2160x3840">2160×3840（4K 直向）</option>
+              <option value="3840x2160">3840×2160（4K 橫向，實驗性）</option>
+              <option value="2160x3840">2160×3840（4K 直向，實驗性）</option>
               <option value="custom">自訂</option>
             </select>
           </div>
@@ -71,11 +71,13 @@
               <option value="low">低</option>
               <option value="medium">中</option>
               <option value="high" selected>高</option>
+              <option value="xhigh">極高</option>
+              <option value="max">最高</option>
             </select>
           </div>
         </div>
         <div class="form-group" id="customSizeGroup" style="display:none;">
-          <label for="customSize">自訂尺寸 <span class="hint">（寬x高，16倍數）</span></label>
+          <label for="customSize">自訂尺寸 <span class="hint">（寬x高，16 倍數，單邊 ≤3840，比例 ≤3:1；超過 2560×1440 為實驗性）</span></label>
           <input type="text" id="customSize" placeholder="1280x720">
         </div>
         <div class="row">
@@ -87,6 +89,16 @@
               <option value="webp">WebP</option>
             </select>
           </div>
+          <div class="form-group">
+            <label for="background">背景</label>
+            <select id="background">
+              <option value="auto" selected>自動</option>
+              <option value="opaque">不透明</option>
+              <option value="transparent">透明（PNG / WebP）</option>
+            </select>
+          </div>
+        </div>
+        <div class="row">
           <div class="form-group">
             <label for="partials">串流預覽</label>
             <select id="partials">
@@ -109,20 +121,20 @@
 
       <div id="tab-edit" class="tab-content">
         <div class="form-group">
-          <label for="editPrompt">編輯提示詞</label>
-          <textarea id="editPrompt" placeholder="把背景換成海灘日落"></textarea>
+          <label for="editPrompt">編輯提示詞 <span class="hint">（只改哪裡、保留什麼；多張圖請標明各自用途）</span></label>
+          <textarea id="editPrompt" placeholder="只把背景換成海灘日落，保留人物的臉、髮型、姿勢、服裝與光線方向不變；不要加入文字或浮水印"></textarea>
         </div>
         <div class="form-group">
-          <label>圖片 <span class="hint">（貼上 / 拖放 / 選檔，可多張）</span></label>
+          <label>圖片 <span class="hint">（PNG / JPEG / WebP，每張小於 50MB，最多 16 張）</span></label>
           <div class="drop-zone" id="editDropZone" tabindex="0">
             <div class="drop-zone-text" id="editDropText">Ctrl+V 貼上或拖放圖片到此處</div>
             <div class="drop-zone-preview" id="editPreview"></div>
-            <input type="file" id="editImage" accept="image/*" multiple style="display:none;" aria-label="選擇編輯圖片">
+            <input type="file" id="editImage" accept="image/png,image/jpeg,image/webp" multiple style="display:none;" aria-label="選擇編輯圖片">
             <button type="button" class="drop-zone-browse" onclick="document.getElementById('editImage').click()">選擇檔案</button>
           </div>
         </div>
         <div class="form-group">
-          <label>遮罩 <span class="hint">（選填，貼上 / 拖放 / 選檔）</span></label>
+          <label>遮罩 <span class="hint">（選填；PNG 含透明通道、與第一張圖同尺寸，透明處為修改區）</span></label>
           <div class="drop-zone drop-zone-sm" id="maskDropZone" tabindex="0">
             <div class="drop-zone-text" id="maskDropText">Ctrl+V 或拖放遮罩</div>
             <div class="drop-zone-preview" id="maskPreview"></div>
@@ -138,11 +150,11 @@
               <option value="1024x1024" selected>1024×1024（正方形）</option>
               <option value="1536x1024">1536×1024（橫向）</option>
               <option value="1024x1536">1024×1536（直向）</option>
-              <option value="2048x2048">2048×2048（2K 正方形）</option>
+              <option value="2048x2048">2048×2048（2K 正方形，實驗性）</option>
               <option value="2048x1152">2048×1152（2K 橫向）</option>
               <option value="1152x2048">1152×2048（2K 直向）</option>
-              <option value="3840x2160">3840×2160（4K 橫向）</option>
-              <option value="2160x3840">2160×3840（4K 直向）</option>
+              <option value="3840x2160">3840×2160（4K 橫向，實驗性）</option>
+              <option value="2160x3840">2160×3840（4K 直向，實驗性）</option>
               <option value="custom">自訂</option>
             </select>
           </div>
@@ -153,11 +165,13 @@
               <option value="low">低</option>
               <option value="medium">中</option>
               <option value="high" selected>高</option>
+              <option value="xhigh">極高</option>
+              <option value="max">最高</option>
             </select>
           </div>
         </div>
         <div class="form-group" id="editCustomSizeGroup" style="display:none;">
-          <label for="editCustomSize">自訂尺寸 <span class="hint">（寬x高，16倍數）</span></label>
+          <label for="editCustomSize">自訂尺寸 <span class="hint">（寬x高，16 倍數，單邊 ≤3840，比例 ≤3:1；超過 2560×1440 為實驗性）</span></label>
           <input type="text" id="editCustomSize" placeholder="1280x720">
         </div>
         <div class="row">
@@ -169,12 +183,23 @@
               <option value="webp">WebP</option>
             </select>
           </div>
+          <div class="form-group">
+            <label for="editBackground">背景</label>
+            <select id="editBackground">
+              <option value="auto" selected>自動</option>
+              <option value="opaque">不透明</option>
+              <option value="transparent">透明（PNG / WebP）</option>
+            </select>
+          </div>
         </div>
         <div class="form-group" id="editCompressionGroup" style="display:none;">
           <label for="editCompression">壓縮率 <span class="hint" id="editCompressionVal">50%</span></label>
           <input type="range" id="editCompression" min="0" max="100" value="50">
         </div>
-        <button onclick="editImage()" id="editBtn" class="btn-primary">編輯圖片</button>
+        <div style="display:flex; gap:8px;">
+          <button onclick="editImage()" id="editBtn" class="btn-primary" style="flex:1;">編輯圖片</button>
+          <button type="button" onclick="stopEdit()" id="stopEditBtn" class="btn-stop" style="display:none;">停止</button>
+        </div>
         <div class="progress-bar" id="uploadProgress"><div class="progress-bar-fill" id="uploadProgressFill"></div></div>
       </div>
 
@@ -244,7 +269,7 @@
       </div>
       <div class="chat-messages" id="chatMessages"></div>
       <div class="chat-composer">
-        <textarea id="chatInput" rows="1" placeholder="輸入微調指令，例如：把背景換成海灘日落"></textarea>
+        <textarea id="chatInput" rows="1" placeholder="一次只改一處，例如：只把背景換成海灘日落，其餘保持不變"></textarea>
         <button id="chatSendBtn" class="chat-send" onclick="chatSendOrStop()">送出</button>
       </div>
       <div class="chat-status" id="chatStatus"></div>

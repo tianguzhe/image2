@@ -1,5 +1,16 @@
 // HTTP requests, SSE parsing, authentication, timeout and cancellation. Uses settings.js.
 
+// OpenAI-style errors are JSON ({ error: { message, code } }); proxies may send plain text.
+function httpErrorMessage(status, text) {
+  try {
+    const err = JSON.parse(text).error;
+    if (err?.message) return `HTTP ${status}: ${err.message}${err.code ? ` (${err.code})` : ''}`;
+  } catch {
+    // Not JSON: fall through to the raw body.
+  }
+  return `HTTP ${status}: ${text.slice(0, 500)}`;
+}
+
 function getHeaders() {
   const h = { 'Content-Type': 'application/json' };
   const key = document.getElementById('apiKey').value.trim();
@@ -23,7 +34,7 @@ async function callGenerateAPI(body, signal) {
       body: JSON.stringify(body),
       signal: fetchSignal
     });
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+    if (!res.ok) throw new Error(httpErrorMessage(res.status, await res.text()));
     // Keep the timeout active until the response body has finished downloading.
     return await res.json();
   } catch (e) {
@@ -115,19 +126,8 @@ async function callGenerateAPIStream(body, { signal, onPartial } = {}) {
   return readImageAPIResponse(res, onPartial);
 }
 
-async function callEditAPIStream(formData, { signal, onPartial } = {}) {
-  const base = getBaseUrl();
-  const headers = { 'Accept': 'text/event-stream' };
-  const key = document.getElementById('apiKey').value.trim();
-  if (key) headers['Authorization'] = `Bearer ${key}`;
-  const res = await fetch(`${base}/images/edits`, {
-    method: 'POST', headers, body: formData, signal
-  });
-  return readImageAPIResponse(res, onPartial);
-}
-
 async function readImageAPIResponse(res, onPartial) {
-  if (!res.ok) throw new Error(`HTTP ${res.status}: ${await res.text()}`);
+  if (!res.ok) throw new Error(httpErrorMessage(res.status, await res.text()));
   const contentType = res.headers.get('content-type') || '';
   // Proxies may ignore stream:true and return plain JSON.
   if (!contentType.includes('text/event-stream')) return res.json();
@@ -168,10 +168,12 @@ function callEditAPI(formData, onProgress, signal) {
         try { resolve(JSON.parse(xhr.responseText)); }
         catch { reject(new Error('回應格式錯誤')); }
       } else {
-        reject(new Error(`HTTP ${xhr.status}: ${xhr.responseText}`));
+        reject(new Error(httpErrorMessage(xhr.status, xhr.responseText)));
       }
     };
-    xhr.onerror = () => { cleanup(); reject(new Error('網路錯誤')); };
+    // XHR gives no detail on network/CORS failures; mirror fetch's TypeError so
+    // explainFetchFailure() gives the same guidance as the generate tab.
+    xhr.onerror = () => { cleanup(); reject(new TypeError('NetworkError: upload did not reach the server')); };
     xhr.ontimeout = () => { cleanup(); reject(new Error('請求超時（超過5分鐘），請稍後重試')); };
     xhr.onabort = () => {
       cleanup();

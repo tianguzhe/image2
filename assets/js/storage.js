@@ -1,5 +1,15 @@
 // IndexedDB connection, gallery records and conversation records. Uses state.js and filesystem.js.
 
+// Settles when a write transaction commits. Browsers abort (not error) transactions that
+// exceed the storage quota, so onabort must reject too or callers wait forever.
+function transactionDone(tx) {
+  return new Promise((resolve, reject) => {
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error || new Error('IndexedDB 交易已中止'));
+  });
+}
+
 function openDB() {
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject) => {
@@ -61,12 +71,10 @@ async function addToHistory(type, prompt, images, fmt) {
     } else {
       item.images = images;
     }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(DB_STORE, 'readwrite');
-      tx.objectStore(DB_STORE).add(item);
-      tx.oncomplete = () => { renderGallery(); resolve(); };
-      tx.onerror = () => reject(tx.error);
-    });
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    tx.objectStore(DB_STORE).add(item);
+    await transactionDone(tx);
+    renderGallery();
   } catch (e) {
     console.error('IndexedDB addToHistory failed:', e);
     const errMsg = e.name === 'QuotaExceededError'
@@ -87,20 +95,14 @@ async function deleteHistoryItem(id) {
         req.onerror = () => rej(req.error);
       });
       if (record?.filenames) {
-        for (const fname of record.filenames) {
-          try { await dirHandle.removeEntry(fname); } catch {}
-        }
+        for (const fname of record.filenames) await removeLocalFile(fname);
       }
     }
-    return new Promise((resolve, reject) => {
-      const tx = db.transaction(DB_STORE, 'readwrite');
-      tx.objectStore(DB_STORE).delete(id);
-      tx.oncomplete = () => {
-        invalidateGalleryCache(id);
-        renderGallery().then(resolve, reject);
-      };
-      tx.onerror = () => reject(tx.error);
-    });
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    tx.objectStore(DB_STORE).delete(id);
+    await transactionDone(tx);
+    invalidateGalleryCache(id);
+    await renderGallery();
   } catch (e) {
     console.error('IndexedDB deleteHistoryItem failed:', e);
     showError('刪除失敗');
@@ -128,17 +130,12 @@ async function deleteSingleImage(historyId, imageIndex) {
       return;
     }
 
-    if (isFS && dirHandle) {
-      try { await dirHandle.removeEntry(arr[imageIndex]); } catch {}
-    }
+    if (isFS && dirHandle) await removeLocalFile(arr[imageIndex]);
     arr.splice(imageIndex, 1);
 
-    await new Promise((resolve, reject) => {
-      const tx = db.transaction(DB_STORE, 'readwrite');
-      tx.objectStore(DB_STORE).put(record);
-      tx.oncomplete = resolve;
-      tx.onerror = () => reject(tx.error);
-    });
+    const tx = db.transaction(DB_STORE, 'readwrite');
+    tx.objectStore(DB_STORE).put(record);
+    await transactionDone(tx);
     invalidateGalleryCache(historyId);
     await renderGallery();
   } catch (e) {
@@ -148,7 +145,8 @@ async function deleteSingleImage(historyId, imageIndex) {
 }
 
 async function clearHistory() {
-  if (!confirm('確定重置所有設定？本地資料夾的圖片不會被刪除。')) return;
+  if (!confirm('確定重置？將清除所有設定、畫廊記錄與對話；未設定本地資料夾時，圖片本身也會一併刪除。'
+    + '本地資料夾中的圖片檔不會被刪除。此操作無法復原，建議先匯出備份。')) return;
   try {
     dirHandle = null;
     useLocalFS = false;
@@ -157,7 +155,7 @@ async function clearHistory() {
     localStorage.removeItem(PERSIST_KEY);
     // Close our cached connection first, otherwise deleteDatabase stays blocked
     if (dbPromise) {
-      try { (await dbPromise).close(); } catch {}
+      try { (await dbPromise).close(); } catch (e) { console.warn('closing IndexedDB before reset failed:', e); }
       dbPromise = null;
     }
     await new Promise((resolve, reject) => {
@@ -183,19 +181,19 @@ async function migrateFromLocalStorage() {
     const tx = db.transaction(DB_STORE, 'readwrite');
     const store = tx.objectStore(DB_STORE);
     for (const item of list) store.put(item);
-    await new Promise((res, rej) => { tx.oncomplete = res; tx.onerror = rej; });
+    await transactionDone(tx);
     localStorage.removeItem(STORAGE_KEY);
-  } catch {}
+  } catch (e) {
+    // Keep the legacy data in localStorage so the next load can retry.
+    console.error('migrateFromLocalStorage failed:', e);
+  }
 }
 
 async function saveConversation(conv) {
   const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(DB_CONV, 'readwrite');
-    tx.objectStore(DB_CONV).put(conv);
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
+  const tx = db.transaction(DB_CONV, 'readwrite');
+  tx.objectStore(DB_CONV).put(conv);
+  await transactionDone(tx);
 }
 
 async function loadConversations() {
@@ -226,18 +224,16 @@ async function loadConversation(id) {
 async function deleteConversation(id) {
   const db = await openDB();
   const conv = await loadConversation(id);
-  if (conv && useLocalFS && dirHandle) {
-    for (const turn of conv.turns) {
-      if (!turn.filenames) continue;
-      for (const fname of turn.filenames) {
-        try { await dirHandle.removeEntry(fname); } catch {}
+  for (const turn of conv?.turns || []) {
+    for (const fname of turn.filenames || []) {
+      if (chatBlobCache.has(fname)) {
+        URL.revokeObjectURL(chatBlobCache.get(fname));
+        chatBlobCache.delete(fname);
       }
+      if (useLocalFS && dirHandle) await removeLocalFile(fname);
     }
   }
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(DB_CONV, 'readwrite');
-    tx.objectStore(DB_CONV).delete(id);
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
+  const tx = db.transaction(DB_CONV, 'readwrite');
+  tx.objectStore(DB_CONV).delete(id);
+  await transactionDone(tx);
 }

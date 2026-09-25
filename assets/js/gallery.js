@@ -10,15 +10,17 @@ function invalidateGalleryCache(historyId) {
 }
 
 async function renderGallery() {
+  // Renders overlap (new image, resize, filter, delete); only the latest may touch the
+  // cache or the DOM, otherwise cards duplicate and data-*-idx point at the wrong image.
+  const version = ++galleryRenderVersion;
+  const isStale = () => version !== galleryRenderVersion;
   const list = await loadHistory();
+  if (isStale()) return;
   const grid = document.getElementById('galleryGrid');
   const empty = document.getElementById('galleryEmpty');
   const countEl = document.getElementById('galleryCount');
 
   const filtered = currentGalleryFilter === 'all' ? list : list.filter(h => h.type === currentGalleryFilter);
-
-  grid.innerHTML = '';
-  galleryFlatList = [];
 
   // Drop object URLs whose backing record was deleted; keep the rest cached
   // across renders (filter/sort/resize) so FS files are read only once and
@@ -66,8 +68,11 @@ async function renderGallery() {
           const fh = await dirHandle.getFileHandle(entry.fname);
           const file = await fh.getFile();
           blobUrlCache.set(entry.fname, URL.createObjectURL(file));
-        } catch {}
+        } catch (e) {
+          console.warn('gallery: cannot read local file', entry.fname, e);
+        }
       }));
+      if (isStale()) return;
     }
     for (const entry of entries) {
       if (entry.isFS) entry.src = blobUrlCache.get(entry.fname) || '';
@@ -81,9 +86,16 @@ async function renderGallery() {
   const toDecode = entries.filter(e => e.b64 && !blobUrlCache.has(e.fname));
   for (let i = 0; i < toDecode.length; i += BATCH_SIZE) {
     for (const entry of toDecode.slice(i, i + BATCH_SIZE)) {
-      try { blobUrlCache.set(entry.fname, b64ToObjectUrl(entry.b64, entry.mime)); } catch {}
+      try {
+        blobUrlCache.set(entry.fname, b64ToObjectUrl(entry.b64, entry.mime));
+      } catch (e) {
+        console.warn('gallery: skip malformed image', entry.fname, e);
+      }
     }
-    if (i + BATCH_SIZE < toDecode.length) await new Promise(r => setTimeout(r));
+    if (i + BATCH_SIZE < toDecode.length) {
+      await new Promise(r => setTimeout(r));
+      if (isStale()) return;
+    }
   }
   for (const entry of entries) {
     if (entry.b64) entry.src = blobUrlCache.get(entry.fname) || '';
@@ -96,6 +108,8 @@ async function renderGallery() {
     return 2;
   }
   const colCount = getColCount();
+  grid.innerHTML = '';
+  galleryFlatList = [];
   const cols = [];
   for (let c = 0; c < colCount; c++) {
     const col = document.createElement('div');

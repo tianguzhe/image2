@@ -2,7 +2,7 @@ const { test } = require('node:test');
 const assert = require('node:assert/strict');
 const { harness, base64, deferred } = require('../support/harness.cjs');
 
-test('generate and edit streaming APIs preserve requests, JSON fallback and HTTP errors', async () => {
+test('generate streaming API preserves requests, JSON fallback and HTTP errors', async () => {
   const h = harness();
   h.ctx.getBaseUrl = () => 'https://example.test/v1';
   h.element('apiKey').value = ' test-key ';
@@ -15,23 +15,14 @@ test('generate and edit streaming APIs preserve requests, JSON fallback and HTTP
   const signal = new AbortController().signal;
   const body = { model: 'gpt-image-2.5-sunburst', prompt: 'test', stream: true };
   assert.equal(await h.ctx.callGenerateAPIStream(body, { signal }), payload);
-  const form = new FormData();
-  form.append('image[]', new Blob(['image']), 'input.png');
-  assert.equal(await h.ctx.callEditAPIStream(form, { signal }), payload);
   assert.equal(calls[0].url, 'https://example.test/v1/images/generations');
   assert.equal(calls[0].options.body, JSON.stringify(body));
   assert.equal(calls[0].options.headers['Content-Type'], 'application/json');
-  assert.equal(calls[1].url, 'https://example.test/v1/images/edits');
-  assert.equal(calls[1].options.body, form);
-  assert.equal(calls[1].options.headers['Content-Type'], undefined);
-  for (const { options } of calls) {
-    assert.equal(options.signal, signal);
-    assert.equal(options.headers.Authorization, 'Bearer test-key');
-    assert.equal(options.headers.Accept, 'text/event-stream');
-  }
+  assert.equal(calls[0].options.signal, signal);
+  assert.equal(calls[0].options.headers.Authorization, 'Bearer test-key');
+  assert.equal(calls[0].options.headers.Accept, 'text/event-stream');
   h.ctx.fetch = async () => ({ ok: false, status: 429, text: async () => 'rate limited' });
   await assert.rejects(h.ctx.callGenerateAPIStream(body), /HTTP 429: rate limited/);
-  await assert.rejects(h.ctx.callEditAPIStream(form), /HTTP 429: rate limited/);
 });
 
 for (const newline of ['\n', '\r\n']) {
@@ -56,12 +47,10 @@ test(`streaming handles official image events with ${JSON.stringify(newline)} de
     streams.push(response.body);
     return response;
   };
-  for (const call of [h.ctx.callGenerateAPIStream, h.ctx.callEditAPIStream]) {
-    const partials = [];
-    const result = await call({}, { onPartial: (...args) => partials.push(args) });
-    assert.deepEqual(partials, [['preview', 0]]);
-    assert.equal(result.data[0].b64_json, 'final');
-  }
+  const partials = [];
+  const result = await h.ctx.callGenerateAPIStream({}, { onPartial: (...args) => partials.push(args) });
+  assert.deepEqual(partials, [['preview', 0]]);
+  assert.equal(result.data[0].b64_json, 'final');
   assert(streams.every(stream => !stream.locked));
 });
 }
@@ -134,4 +123,36 @@ test('generation timeout remains active until the JSON response body is consumed
   await request;
   assert.equal(clearedDuringDownload, false);
   assert.equal(timeoutCleared, true);
+});
+
+test('HTTP errors surface the API error message and code instead of raw JSON', async () => {
+  const h = harness();
+  h.ctx.getBaseUrl = () => 'https://example.test/v1';
+  const body = JSON.stringify({ error: { message: 'Your request was rejected', type: 'image_generation_user_error',
+    code: 'moderation_blocked' } });
+  h.ctx.fetch = async () => ({ ok: false, status: 400, text: async () => body });
+  const expected = 'HTTP 400: Your request was rejected (moderation_blocked)';
+  await assert.rejects(h.ctx.callGenerateAPI({}), { message: expected });
+  await assert.rejects(h.ctx.callGenerateAPIStream({}), { message: expected });
+  h.ctx.XMLHttpRequest = class {
+    constructor() { this.upload = {}; }
+    open() {}
+    setRequestHeader() {}
+    send() { this.status = 400; this.responseText = body; this.onload(); }
+  };
+  await assert.rejects(h.ctx.callEditAPI(new FormData()), { message: expected });
+});
+
+test('an edit upload that never reaches the server is explained like a failed fetch', async () => {
+  const h = harness();
+  h.ctx.getBaseUrl = () => 'https://example.test/v1';
+  h.ctx.location = { origin: 'null' };
+  h.ctx.XMLHttpRequest = class {
+    constructor() { this.upload = {}; }
+    open() {}
+    setRequestHeader() {}
+    send() { this.onerror(); }
+  };
+  const error = await h.ctx.callEditAPI(new FormData()).catch(e => e);
+  assert.match(h.ctx.explainFetchFailure(error), /CORS/);
 });

@@ -145,6 +145,14 @@ async function sendChatTurn() {
   const seedTurn = latestImageTurn(activeConv);
   const hasImage = !!seedTurn;
   const fmt = 'png';
+  // Keep output settings fixed across turns: edits follow the edit tab, generation the generate tab.
+  const ids = hasImage
+    ? { size: 'editSize', custom: 'editCustomSize', quality: 'editQuality', background: 'editBackground' }
+    : { size: 'size', custom: 'customSize', quality: 'quality', background: 'background' };
+  const size = getSize(ids.size, ids.custom);
+  if (!size) return;
+  const quality = document.getElementById(ids.quality).value;
+  const background = document.getElementById(ids.background).value;
   // Same streaming preference as the generate tab
   const partials = getPartialImageCount();
   chatBusy = true;
@@ -179,8 +187,11 @@ async function sendChatTurn() {
       const file = await srcToFile(src, seedTurn.fmt || 'png');
       const formData = new FormData();
       formData.append('model', IMAGE_MODEL);
-      formData.append('prompt', prompt);
+      formData.append('prompt', `${prompt}\n\n${CHAT_EDIT_CONSTRAINT}`);
       formData.append('n', '1');
+      if (size !== 'auto') formData.append('size', size);
+      if (quality !== 'auto') formData.append('quality', quality);
+      if (background !== 'auto') formData.append('background', background);
       formData.append('image[]', file);
       // Streamed edits get a 502 without CORS headers from the proxy; match the edit tab and never stream.
       data = await callEditAPI(formData,
@@ -191,6 +202,9 @@ async function sendChatTurn() {
     } else {
       showChatStatus(partials > 0 ? '串流生成中...' : '生成中...');
       const body = { model: IMAGE_MODEL, prompt, n: 1 };
+      if (size !== 'auto') body.size = size;
+      if (quality !== 'auto') body.quality = quality;
+      if (background !== 'auto') body.background = background;
       if (partials > 0) {
         body.stream = true;
         body.partial_images = partials;

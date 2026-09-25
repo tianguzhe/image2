@@ -10,6 +10,9 @@ for (const hasSeed of [false, true]) {
       h.ctx.removeChatPartial = () => {};
       h.element('chatInput').value = 'refine';
       h.element('partials').value = streaming ? '2' : '0';
+      const values = { size: '1536x1024', quality: 'high', background: 'auto',
+        editSize: '1024x1536', editQuality: 'medium', editBackground: 'opaque' };
+      for (const [id, value] of Object.entries(values)) h.element(id).value = value;
       if (hasSeed) h.ctx.activeConv = {
         id: 42, title: 'seed', turns: [{ kind: 'seed', fmt: 'png', images: [{ b64_json: base64 }] }],
       };
@@ -23,7 +26,6 @@ for (const hasSeed of [false, true]) {
       h.ctx.callGenerateAPI = response('generate', false);
       h.ctx.callGenerateAPIStream = response('generate', true);
       h.ctx.callEditAPI = response('edit', false);
-      h.ctx.callEditAPIStream = response('edit', true);
       await h.ctx.sendChatTurn();
       assert.equal(endpoint, hasSeed ? 'edit' : 'generate');
       // The proxy returns 502 for streamed edits, so chat edits never stream.
@@ -33,8 +35,18 @@ for (const hasSeed of [false, true]) {
         assert.equal(request.get('stream'), null);
         assert.equal(request.get('partial_images'), null);
         assert.equal(request.get('image[]').name, 'input.png');
+        // Chat edits reuse the edit tab settings and restate what must stay unchanged.
+        assert.equal(request.get('size'), '1024x1536');
+        assert.equal(request.get('quality'), 'medium');
+        assert.equal(request.get('background'), 'opaque');
+        assert.equal(request.get('prompt'),
+          'refine\n\n只修改上述指令提到的部分；其餘構圖、主體、光線、風格保持不變；不要加入文字或浮水印。');
       } else {
         assert.equal(request.model, 'gpt-image-2.5-sunburst');
+        assert.equal(request.prompt, 'refine');
+        assert.equal(request.size, '1536x1024');
+        assert.equal(request.quality, 'high');
+        assert.equal(request.background, undefined);
         assert.equal(request.stream, streaming ? true : undefined);
         assert.equal(request.partial_images, streaming ? 2 : undefined);
       }
@@ -43,9 +55,28 @@ for (const hasSeed of [false, true]) {
       assert.equal(h.element('chatSendBtn').textContent, '送出');
       const saved = h.records.get('conversations').get(hasSeed ? 42 : 100);
       assert.equal(saved.turns.at(-1).kind, hasSeed ? 'edit' : 'generate');
+      assert.equal(saved.turns.at(-1).prompt, 'refine');
     });
   }
 }
+
+test('chat rejects invalid edit settings before sending or recording a turn', async () => {
+  const h = harness();
+  h.ctx.requireBaseUrl = () => 'https://example.test/v1';
+  h.element('chatInput').value = 'refine';
+  const values = { editSize: 'custom', editCustomSize: '1000x1000', editQuality: 'auto', editBackground: 'auto' };
+  for (const [id, value] of Object.entries(values)) h.element(id).value = value;
+  const conv = { id: 42, title: 'seed', turns: [{ kind: 'seed', fmt: 'png', images: [{ b64_json: base64 }] }] };
+  h.ctx.activeConv = conv;
+  let calls = 0;
+  h.ctx.callEditAPI = async () => { calls++; };
+  await h.ctx.sendChatTurn();
+  assert.equal(calls, 0);
+  assert.equal(h.alerts.length, 1);
+  assert.equal(conv.turns.length, 1);
+  assert.equal(h.element('chatInput').value, 'refine');
+  assert.equal(h.ctx.chatBusy, false);
+});
 
 test('single conversation deletion keeps unrelated records, confirms, handles failures and empties history', async () => {
   const h = harness();
@@ -83,6 +114,7 @@ test('pending generation saves to its originating conversation after the user op
   h.ctx.removeChatPartial = () => {};
   h.element('chatInput').value = 'original request';
   h.element('partials').value = '2';
+  for (const id of ['size', 'quality', 'background']) h.element(id).value = 'auto';
   const original = { id: 1, title: 'original', turns: [] };
   const next = { id: 2, title: 'next', turns: [] };
   h.ctx.activeConv = original;
@@ -123,3 +155,19 @@ for (const sameConversation of [false, true]) {
     assert(!messages[0].innerHTML.includes('base64,old'));
   });
 }
+
+test('Enter that confirms an IME composition does not send the chat turn', () => {
+  const h = harness();
+  h.ctx.initChat();
+  let sent = 0;
+  h.ctx.sendChatTurn = () => { sent++; };
+  const press = extra => h.element('chatInput').dispatchEvent({ type: 'keydown', key: 'Enter', shiftKey: false,
+    isComposing: false, keyCode: 13, preventDefault() {}, ...extra });
+  press({ isComposing: true });
+  // Safari reports the confirming Enter with isComposing=false but keyCode 229.
+  press({ keyCode: 229 });
+  press({ shiftKey: true });
+  assert.equal(sent, 0);
+  press();
+  assert.equal(sent, 1);
+});

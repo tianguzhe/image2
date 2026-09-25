@@ -138,6 +138,9 @@ function closeChatHistory() {
 function initChat() {
   // ---- chat event wiring ----
   document.getElementById('chatInput').addEventListener('keydown', (e) => {
+    // Enter also confirms an IME candidate (Chinese/Japanese input); that must not send.
+    // Safari reports that Enter with isComposing=false, so keyCode 229 is checked too.
+    if (e.isComposing || e.keyCode === 229) return;
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatTurn(); }
   });
   document.getElementById('chatMessages').addEventListener('click', (e) => {

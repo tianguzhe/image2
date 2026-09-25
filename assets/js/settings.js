@@ -31,7 +31,9 @@ function loadFormState() {
       el.dispatchEvent(new Event('change'));
       el.dispatchEvent(new Event('input'));
     });
-  } catch {}
+  } catch (e) {
+    console.warn('loadFormState: ignoring unreadable saved form state:', e);
+  }
 }
 
 function persistFormState() {
@@ -53,9 +55,29 @@ function getSize(sizeId = 'size', customSizeId = 'customSize') {
   if (v === 'custom') {
     const c = document.getElementById(customSizeId).value.trim();
     if (!/^\d+x\d+$/.test(c)) { alert('自訂尺寸格式錯誤，請用 寬x高'); return null; }
+    const problem = customSizeProblem(...c.split('x').map(Number));
+    if (problem) { alert('自訂尺寸不符合模型限制：' + problem); return null; }
     return c;
   }
   return v;
+}
+
+// GPT Image 2.5 custom resolution rules; the API rejects sizes outside them.
+function customSizeProblem(w, h) {
+  if (w % 16 || h % 16) return '寬高都必須是 16 的倍數';
+  if (Math.max(w, h) > 3840) return '單邊不可超過 3840';
+  if (Math.max(w, h) > Math.min(w, h) * 3) return '長短邊比例不可超過 3:1';
+  if (w * h < 655360 || w * h > 8294400) return '總像素須介於 655,360 與 8,294,400 之間';
+  return '';
+}
+
+// Transparency needs an alpha channel, which JPEG lacks.
+function checkBackgroundFormat(background, fmt) {
+  if (background === 'transparent' && fmt === 'jpeg') {
+    alert('透明背景只支援 PNG 或 WebP，請更換格式');
+    return false;
+  }
+  return true;
 }
 
 function getPartialImageCount() {

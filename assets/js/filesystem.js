@@ -2,12 +2,9 @@
 
 async function saveDirHandle(handle) {
   const db = await openDB();
-  return new Promise((resolve, reject) => {
-    const tx = db.transaction(DB_SETTINGS, 'readwrite');
-    tx.objectStore(DB_SETTINGS).put({ key: 'dirHandle', handle });
-    tx.oncomplete = resolve;
-    tx.onerror = () => reject(tx.error);
-  });
+  const tx = db.transaction(DB_SETTINGS, 'readwrite');
+  tx.objectStore(DB_SETTINGS).put({ key: 'dirHandle', handle });
+  await transactionDone(tx);
 }
 
 async function loadDirHandle() {
@@ -76,12 +73,9 @@ async function migrateToFileSystem() {
     try {
       const filenames = await persistImages(item.images, item.fmt, String(item.id));
       const updated = { id: item.id, type: item.type, prompt: item.prompt, filenames, fmt: item.fmt, time: item.time };
-      await new Promise((resolve, reject) => {
-        const tx = db.transaction(DB_STORE, 'readwrite');
-        tx.objectStore(DB_STORE).put(updated);
-        tx.oncomplete = resolve;
-        tx.onerror = () => reject(tx.error);
-      });
+      const tx = db.transaction(DB_STORE, 'readwrite');
+      tx.objectStore(DB_STORE).put(updated);
+      await transactionDone(tx);
     } catch (e) {
       console.error(`Migration failed for item ${item.id}:`, e);
     }
@@ -125,6 +119,15 @@ async function writeLocalFile(filename, contents) {
   const writable = await handle.createWritable();
   await writable.write(contents);
   await writable.close();
+}
+
+// A missing file is already the desired end state; log anything else but keep deleting.
+async function removeLocalFile(filename) {
+  try {
+    await dirHandle.removeEntry(filename);
+  } catch (e) {
+    if (e.name !== 'NotFoundError') console.warn('removeLocalFile failed:', filename, e);
+  }
 }
 
 async function persistImages(images, fmt, prefix) {
@@ -172,5 +175,8 @@ async function updateStorageUsage() {
     } else {
       el.textContent = `${count} 筆`;
     }
-  } catch { el.textContent = ''; }
+  } catch (e) {
+    console.warn('updateStorageUsage failed:', e);
+    el.textContent = '';
+  }
 }
