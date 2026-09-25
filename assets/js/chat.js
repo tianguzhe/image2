@@ -182,17 +182,12 @@ async function sendChatTurn() {
       formData.append('prompt', prompt);
       formData.append('n', '1');
       formData.append('image[]', file);
-      if (partials > 0) {
-        formData.append('stream', 'true');
-        formData.append('partial_images', String(partials));
-        data = await callEditAPIStream(formData, { signal: chatController.signal, onPartial });
-      } else {
-        data = await callEditAPI(formData,
-          (pct) => {
-            if (activeConv === conversation) showChatStatus(pct < 100 ? `上傳中 ${pct}%...` : '生成中...');
-          },
-          chatController.signal);
-      }
+      // Streamed edits get a 502 without CORS headers from the proxy; match the edit tab and never stream.
+      data = await callEditAPI(formData,
+        (pct) => {
+          if (activeConv === conversation) showChatStatus(pct < 100 ? `上傳中 ${pct}%...` : '生成中...');
+        },
+        chatController.signal);
     } else {
       showChatStatus(partials > 0 ? '串流生成中...' : '生成中...');
       const body = { model: IMAGE_MODEL, prompt, n: 1 };

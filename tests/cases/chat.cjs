@@ -4,7 +4,7 @@ const { harness, base64, deferred } = require('../support/harness.cjs');
 
 for (const hasSeed of [false, true]) {
   for (const streaming of [false, true]) {
-    test(`Sunburst chat requests use the selected streaming mode: seed=${hasSeed}, stream=${streaming}`, async () => {
+    test(`Sunburst chat generation follows the streaming setting and edits never stream: seed=${hasSeed}, stream=${streaming}`, async () => {
       const h = harness();
       h.ctx.requireBaseUrl = () => 'https://example.test/v1';
       h.ctx.removeChatPartial = () => {};
@@ -26,11 +26,12 @@ for (const hasSeed of [false, true]) {
       h.ctx.callEditAPIStream = response('edit', true);
       await h.ctx.sendChatTurn();
       assert.equal(endpoint, hasSeed ? 'edit' : 'generate');
-      assert.equal(actualStreaming, streaming);
+      // The proxy returns 502 for streamed edits, so chat edits never stream.
+      assert.equal(actualStreaming, hasSeed ? false : streaming);
       if (hasSeed) {
         assert.equal(request.get('model'), 'gpt-image-2.5-sunburst');
-        assert.equal(request.get('stream'), streaming ? 'true' : null);
-        assert.equal(request.get('partial_images'), streaming ? '2' : null);
+        assert.equal(request.get('stream'), null);
+        assert.equal(request.get('partial_images'), null);
         assert.equal(request.get('image[]').name, 'input.png');
       } else {
         assert.equal(request.model, 'gpt-image-2.5-sunburst');
