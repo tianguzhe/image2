@@ -1,10 +1,14 @@
 // HTTP requests, SSE parsing, authentication, timeout and cancellation. Uses settings.js.
 
-// OpenAI-style errors are JSON ({ error: { message, code } }); proxies may send plain text.
+// Proxies also return { message, code } or a string error; keep the useful message visible.
 function httpErrorMessage(status, text) {
   try {
-    const err = JSON.parse(text).error;
-    if (err?.message) return `HTTP ${status}: ${err.message}${err.code ? ` (${err.code})` : ''}`;
+    const payload = JSON.parse(text);
+    const err = payload?.error ?? payload;
+    if (typeof err === 'string' && err) return `HTTP ${status}: ${err.slice(0, 500)}`;
+    if (typeof err?.message === 'string' && err.message) {
+      return `HTTP ${status}: ${err.message.slice(0, 500)}${err.code ? ` (${String(err.code).slice(0, 100)})` : ''}`;
+    }
   } catch {
     // Not JSON: fall through to the raw body.
   }
@@ -18,8 +22,10 @@ function getHeaders() {
   return h;
 }
 
-async function callGenerateAPI(body, signal) {
+async function requestGeneration(body, { signal, onPartial, stream = false } = {}) {
   const base = getBaseUrl();
+  const headers = getHeaders();
+  if (stream) headers.Accept = 'text/event-stream';
   let timeoutId = null;
   let fetchSignal = signal;
   if (!fetchSignal) {
@@ -30,12 +36,13 @@ async function callGenerateAPI(body, signal) {
   try {
     const res = await fetch(`${base}/images/generations`, {
       method: 'POST',
-      headers: getHeaders(),
+      headers,
       body: JSON.stringify(body),
       signal: fetchSignal
     });
-    if (!res.ok) throw new Error(httpErrorMessage(res.status, await res.text()));
     // Keep the timeout active until the response body has finished downloading.
+    if (stream) return await readImageAPIResponse(res, onPartial);
+    if (!res.ok) throw new Error(httpErrorMessage(res.status, await res.text()));
     return await res.json();
   } catch (e) {
     // Internal timeout only; external aborts propagate as AbortError for the caller
@@ -46,84 +53,114 @@ async function callGenerateAPI(body, signal) {
   }
 }
 
+async function callGenerateAPI(body, signal) {
+  return requestGeneration(body, { signal });
+}
+
 async function readImageEventStream(res, onPartial) {
+  if (!res.body) throw new Error('串流回應沒有內容');
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
-  let buffer = '';
   const finalImages = [];
-  let streamError = null;
+  let eventName = '';
+  let dataLines = [];
+  let lineParts = [];
+  let skipLF = false;
+  let streamDone = false;
+  let readerDone = false;
 
-  const processBlock = (raw) => {
-    const lines = raw.split(/\r?\n/);
-    let eventName = '';
-    const dataLines = [];
-    for (const line of lines) {
-      if (line.startsWith(':')) continue;
-      if (line.startsWith('event:')) eventName = line.slice(6).trim();
-      // SSE spec: strip only the first space after "data:"
-      if (line.startsWith('data:')) dataLines.push(line.slice(5).replace(/^ /, ''));
-    }
+  const processEvent = () => {
+    const name = eventName;
+    eventName = '';
     if (!dataLines.length) return;
     const data = dataLines.join('\n');
-    if (data === '[DONE]') return;
+    dataLines = [];
+    if (data === '[DONE]') { streamDone = true; return; }
     let payload;
     try { payload = JSON.parse(data); } catch { return; }
-    const type = payload.type || eventName || '';
+    if (!payload || typeof payload !== 'object') return;
+    const type = payload.type || name || '';
     if (type === 'error' || payload.error) {
       const err = payload.error || payload;
-      streamError = new Error(err.message || 'SSE 回傳 error 事件');
-      return;
+      throw new Error(err.message || 'SSE 回傳 error 事件');
     }
     // Event shapes vary across OpenAI versions and proxies; match loosely.
     let b64 = null, isFinal = false, idx = null;
     if (/partial/i.test(type) || payload.partial_image_b64 != null) {
       b64 = payload.partial_image_b64 || payload.b64_json;
       idx = payload.partial_image_index;
+    } else if (Array.isArray(payload.data)) {
+      for (const img of payload.data) {
+        if (typeof img?.b64_json === 'string' && img.b64_json) finalImages.push({ b64_json: img.b64_json });
+      }
+      return;
     } else if (/complete|done/i.test(type)) {
-      b64 = payload.b64_json || payload.data?.[0]?.b64_json || payload.result;
-      isFinal = true;
-    } else if (payload.data?.[0]?.b64_json) {
-      b64 = payload.data[0].b64_json;
+      b64 = payload.b64_json || payload.result;
       isFinal = true;
     } else if (payload.b64_json || payload.result) {
       b64 = payload.b64_json || payload.result;
       isFinal = true;
     }
-    if (!b64) return;
+    if (typeof b64 !== 'string' || !b64) return;
     if (isFinal) finalImages.push({ b64_json: b64 });
     else if (onPartial) onPartial(b64, idx);
   };
 
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      // SSE proxies may use LF or CRLF, including delimiters split across chunks.
-      let separator;
-      while ((separator = /\r?\n\r?\n/.exec(buffer)) !== null) {
-        processBlock(buffer.slice(0, separator.index));
-        buffer = buffer.slice(separator.index + separator[0].length);
+  const processLine = (line) => {
+    if (!line) { processEvent(); return; }
+    if (line.startsWith(':')) return;
+    const colon = line.indexOf(':');
+    const field = colon < 0 ? line : line.slice(0, colon);
+    // SSE strips only the first space after the colon.
+    const value = colon < 0 ? '' : line.slice(colon + 1).replace(/^ /, '');
+    if (field === 'event') eventName = value;
+    if (field === 'data') dataLines.push(value);
+  };
+
+  const processChunk = (chunk) => {
+    // Retain fragments until a complete line arrives. Re-scanning and concatenating
+    // the entire Base64 event on every network chunk becomes quadratic for large images.
+    let start = 0;
+    for (let i = 0; i < chunk.length && !streamDone; i++) {
+      const char = chunk[i];
+      if (skipLF) {
+        skipLF = false;
+        if (char === '\n') { start = i + 1; continue; }
       }
+      if (char !== '\r' && char !== '\n') continue;
+      lineParts.push(chunk.slice(start, i));
+      processLine(lineParts.join(''));
+      lineParts = [];
+      start = i + 1;
+      skipLF = char === '\r';
     }
-    buffer += decoder.decode();
-    if (buffer.trim()) processBlock(buffer);
-    if (streamError) throw streamError;
+    if (!streamDone && start < chunk.length) lineParts.push(chunk.slice(start));
+  };
+
+  try {
+    while (!streamDone) {
+      const { value, done } = await reader.read();
+      if (done) { readerDone = true; break; }
+      processChunk(decoder.decode(value, { stream: true }));
+    }
+    if (!streamDone) {
+      processChunk(decoder.decode());
+      if (lineParts.length) processLine(lineParts.join(''));
+      processEvent();
+    }
     if (!finalImages.length) throw new Error('串流結束但沒有收到最終圖片');
     return { data: finalImages };
   } finally {
+    // Error / [DONE] events can arrive before the proxy closes its connection.
+    if (!readerDone) {
+      try { await reader.cancel(); } catch {}
+    }
     reader.releaseLock();
   }
 }
 
 async function callGenerateAPIStream(body, { signal, onPartial } = {}) {
-  const base = getBaseUrl();
-  const headers = getHeaders();
-  headers['Accept'] = 'text/event-stream';
-  const res = await fetch(`${base}/images/generations`, {
-    method: 'POST', headers, body: JSON.stringify(body), signal
-  });
-  return readImageAPIResponse(res, onPartial);
+  return requestGeneration(body, { signal, onPartial, stream: true });
 }
 
 async function readImageAPIResponse(res, onPartial) {

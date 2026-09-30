@@ -25,9 +25,10 @@ async function inlineLocalImages(filenames, failures) {
 }
 
 async function exportAll() {
+  if (!beginStorageMaintenance()) return;
   try {
-    const history = await loadHistory();
-    const conversations = await loadConversations();
+    const history = await loadHistory({ strict: true });
+    const conversations = await loadConversations({ strict: true });
     // API key deliberately NOT exported: backup files may be shared.
     // Import still accepts old backups that carry an apiKey field.
     const settings = {
@@ -65,6 +66,8 @@ async function exportAll() {
   } catch (e) {
     console.error('Export failed:', e);
     showError('匯出失敗');
+  } finally {
+    storageMaintenance = false;
   }
 }
 
@@ -91,6 +94,13 @@ function validateImage(img, label) {
   if (!img || typeof img !== 'object') return `${label}：不是有效物件`;
   if (!img.b64_json && !img.url) return `${label}：缺少 b64_json 或 url`;
   if (img.b64_json && (typeof img.b64_json !== 'string' || img.b64_json.length > MAX_B64_LENGTH)) return `${label}：b64_json 無效或過大`;
+  if (img.b64_json) {
+    const value = img.b64_json;
+    const padding = value.endsWith('==') ? 2 : value.endsWith('=') ? 1 : 0;
+    const contentLength = value.length - padding;
+    if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || contentLength % 4 === 1
+        || (value.includes('=') && value.length % 4 !== 0)) return `${label}：Base64 格式無效`;
+  }
   if (img.url && typeof img.url !== 'string') return `${label}：url 無效`;
   if (img.url && !sanitizeUrl(img.url)) return `${label}：url 不允許的協定`;
   return null;
@@ -98,7 +108,7 @@ function validateImage(img, label) {
 
 function validateHistoryItem(item, index) {
   if (!item || typeof item !== 'object') return `第 ${index + 1} 筆：不是有效物件`;
-  if (typeof item.id !== 'number' || !Number.isFinite(item.id) || item.id <= 0) return `第 ${index + 1} 筆：id 無效`;
+  if (!Number.isSafeInteger(item.id) || item.id <= 0 || item.id >= Number.MAX_SAFE_INTEGER) return `第 ${index + 1} 筆：id 無效`;
   if (!VALID_TYPES.includes(item.type)) return `第 ${index + 1} 筆：type 必須是 generate 或 edit`;
   if (typeof item.prompt !== 'string' || !item.prompt.trim()) return `第 ${index + 1} 筆：prompt 無效`;
   if (item.fmt != null && !VALID_FORMATS.includes(item.fmt)) return `第 ${index + 1} 筆：fmt 必須是 png/jpeg/webp`;
@@ -135,7 +145,7 @@ function sanitizeHistoryItem(item) {
 function validateConversation(conv, index) {
   const label = `第 ${index + 1} 個對話`;
   if (!conv || typeof conv !== 'object') return `${label}：不是有效物件`;
-  if (typeof conv.id !== 'number' || !Number.isFinite(conv.id) || conv.id <= 0) return `${label}：id 無效`;
+  if (!Number.isSafeInteger(conv.id) || conv.id <= 0 || conv.id >= Number.MAX_SAFE_INTEGER) return `${label}：id 無效`;
   if (!Array.isArray(conv.turns)) return `${label}：缺少 turns 陣列`;
   for (let t = 0; t < conv.turns.length; t++) {
     const turn = conv.turns[t];
@@ -174,6 +184,8 @@ async function importAll(input) {
   const file = input.files[0];
   input.value = '';
   if (!file) return;
+  if (!beginStorageMaintenance()) return;
+  let imported = 0, convImported = 0;
   try {
     const text = await file.text();
     let data;
@@ -183,61 +195,90 @@ async function importAll(input) {
     if (structErr) throw new Error(structErr);
 
     const s = data.settings;
-    if (s.baseUrl) { localStorage.setItem(BASEURL_KEY, s.baseUrl); baseUrlEl.value = s.baseUrl; }
+    let credentialsCleared = false;
+    if (s.baseUrl) {
+      const nextBase = normalizeBaseUrl(s.baseUrl);
+      let currentBase = '';
+      try { currentBase = getBaseUrl(); } catch {}
+      // A shared backup must never silently redirect an existing bearer token.
+      if (nextBase !== currentBase) {
+        localStorage.removeItem(APIKEY_KEY);
+        apiKeyEl.value = '';
+        credentialsCleared = !s.apiKey;
+      }
+      localStorage.setItem(BASEURL_KEY, nextBase);
+      baseUrlEl.value = nextBase;
+    }
     if (s.apiKey) { localStorage.setItem(APIKEY_KEY, s.apiKey); apiKeyEl.value = s.apiKey; }
     if (s.form) { localStorage.setItem(PERSIST_KEY, JSON.stringify(s.form)); loadFormState(); }
 
-    const db = await openDB();
-    let imported = 0, skipped = 0;
+    let skipped = 0;
     for (let idx = 0; idx < data.history.length; idx++) {
       const raw = data.history[idx];
       const itemErr = validateHistoryItem(raw, idx);
       if (itemErr) { console.warn('匯入跳過：' + itemErr); skipped++; continue; }
-      let item = sanitizeHistoryItem(raw);
-
-      if (useLocalFS && dirHandle && item.images) {
-        const ext = imageExtension(item.fmt);
-        const filenames = [];
-        for (let i = 0; i < item.images.length; i++) {
-          const img = item.images[i];
-          if (!img.b64_json) continue;
-          const fname = `${item.id}_${i}.${ext}`;
-          await writeLocalFile(fname, base64ToBytes(img.b64_json));
-          filenames.push(fname);
-        }
-        item = { id: item.id, type: item.type, prompt: item.prompt, filenames, fmt: item.fmt, time: item.time };
-      }
-      const tx = db.transaction(DB_STORE, 'readwrite');
-      tx.objectStore(DB_STORE).put(item);
-      await transactionDone(tx);
-      invalidateGalleryCache(item.id);
+      await importRecord(DB_STORE, sanitizeHistoryItem(raw));
       imported++;
     }
 
-    let convImported = 0;
     const conversations = data.conversations || [];
     for (let idx = 0; idx < conversations.length; idx++) {
       const convErr = validateConversation(conversations[idx], idx);
       if (convErr) { console.warn('匯入跳過：' + convErr); skipped++; continue; }
-      const conv = sanitizeConversation(conversations[idx]);
-      if (useLocalFS && dirHandle) {
-        for (let t = 0; t < conv.turns.length; t++) {
-          const turn = conv.turns[t];
-          if (!turn.images) continue;
-          // Same naming as persistTurnImages so chat deletion finds the files.
-          turn.filenames = await persistImages(turn.images, turn.fmt, `conv_${conv.id}_${t}`);
-          turn.images = null;
-        }
-      }
-      await saveConversation(conv);
+      await importRecord(DB_CONV, sanitizeConversation(conversations[idx]));
       convImported++;
     }
-    renderGallery();
     let msg = `已匯入 ${imported} 筆記錄、${convImported} 個對話`;
     if (skipped) msg += `，跳過 ${skipped} 筆無效資料`;
+    if (credentialsCleared) msg += '；API 地址已變更，請重新填寫 API Key';
     document.getElementById('status').textContent = msg;
   } catch (e) {
     console.error('Import failed:', e);
-    showError('匯入失敗：' + e.message);
+    showError(`匯入失敗（已保留 ${imported} 筆記錄、${convImported} 個對話）：` + e.message);
+  } finally {
+    storageMaintenance = false;
+    await renderGallery();
+    if (currentView === 'chat') await renderChat();
   }
+}
+
+async function importRecord(storeName, record) {
+  const previous = await readRecord(storeName, record.id);
+  const directory = useLocalFS ? dirHandle : null;
+  const isConversation = storeName === DB_CONV;
+  const parts = isConversation ? record.turns : [record];
+  const previousParts = previous ? (isConversation ? previous.turns : [previous]) : [];
+  const written = [];
+  // Even a new record can collide with an unrelated file already in the chosen folder.
+  const suffix = directory ? `_import_${crypto.randomUUID()}` : '';
+  try {
+    if (directory) {
+      for (let i = 0; i < parts.length; i++) {
+        const part = parts[i];
+        if (!part.images?.length) continue;
+        const prefix = isConversation ? `conv_${record.id}_${i}${suffix}` : `${record.id}${suffix}`;
+        part.filenames = await persistImages(part.images, part.fmt, prefix);
+        written.push(...part.filenames);
+        if (isConversation) part.images = null;
+        else delete part.images;
+      }
+    }
+    const db = await openDB();
+    const tx = db.transaction(storeName, 'readwrite');
+    tx.objectStore(storeName).put(record);
+    await transactionDone(tx);
+  } catch (error) {
+    for (const name of written) await removeLocalFile(name, directory);
+    throw error;
+  }
+  lastRecordId = Math.max(lastRecordId, record.id);
+  if (directory) {
+    for (const part of previousParts) {
+      for (const name of part.filenames || []) await removeLocalFile(name, directory);
+    }
+  }
+  if (isConversation) {
+    revokeChatBlobs();
+    if (activeConv?.id === record.id) activeConv = record;
+  } else invalidateGalleryCache(record.id);
 }

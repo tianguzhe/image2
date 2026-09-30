@@ -28,22 +28,25 @@ function removeChatPartial() {
 }
 
 function revokeChatBlobs() {
+  chatCacheVersion++;
   chatBlobCache.forEach(url => URL.revokeObjectURL(url));
   chatBlobCache.clear();
 }
 
-function switchView(name) {
+function switchView(name, restoreConversation = true) {
   if (name !== 'gallery' && name !== 'chat') return;
+  chatNavigationVersion++;
   currentView = name;
   const area = document.querySelector('.gallery-area');
   document.querySelectorAll('#viewSwitch button').forEach(b =>
     b.classList.toggle('active', b.dataset.view === name));
   if (name === 'chat') {
     area.classList.add('chat-mode');
-    if (activeConv) renderChat();
+    if (activeConv || !restoreConversation) renderChat();
     else loadActiveConversation();
   } else {
     area.classList.remove('chat-mode');
+    if (galleryColumns !== getGalleryColumnCount()) renderGallery();
   }
 }
 
@@ -82,15 +85,20 @@ async function renderChat() {
     const src = await turnImageSrc(turn);
     if (version !== chatRenderVersion || activeConv !== conversation) return;
     const ext = imageExtension(turn.fmt);
+    const filename = `chat_${conversation.id}_${i}.${ext}`;
     const safeSrc = escapeHtml(src);
     const div = document.createElement('div');
     div.className = 'chat-msg image';
     div.innerHTML = `${turn.kind === 'seed' ? '<span class="chat-seed-tag">起點</span>' : ''}
       <div class="chat-img-card">${src
-        ? `<img src="${safeSrc}" alt="" loading="lazy">`
+        ? `<button type="button" class="chat-image-open" aria-label="查看圖片大圖"
+            data-filename="${escapeHtml(filename)}" data-chat-image-idx="${i}">
+            <img src="${safeSrc}" alt="" loading="lazy" decoding="async">
+            <span class="chat-img-hint" aria-hidden="true">查看大圖</span>
+          </button>`
         : '<div style="padding:24px;color:var(--text-tertiary);font-size:12px;">圖片已遺失</div>'}</div>
       <div class="chat-img-actions">
-        ${src ? `<a href="${safeSrc}" download="chat_${conversation.id}_${i}.${ext}">下載</a>` : ''}
+        ${src ? `<a href="${safeSrc}" download="${escapeHtml(filename)}">下載</a>` : ''}
         ${turn.prompt ? `<button data-chat-copy-idx="${i}">複製提示詞</button>` : ''}
       </div>`;
     messages.appendChild(div);
@@ -98,18 +106,21 @@ async function renderChat() {
   messages.scrollTop = messages.scrollHeight;
 }
 
-function openChatImage(src) {
+function openChatImage(src, filename = 'image.png', prompt = '') {
   if (!src) return;
-  const lb = document.getElementById('lightbox');
   document.getElementById('lightboxImg').src = src;
-  document.getElementById('lightboxPrompt').textContent = '';
-  const dl = document.getElementById('lightboxDl'); dl.href = src; dl.download = 'image.png';
+  const promptEl = document.getElementById('lightboxPrompt');
+  promptEl.textContent = prompt;
+  promptEl.classList.remove('expanded');
+  const dl = document.getElementById('lightboxDl'); dl.href = src; dl.download = filename;
   document.getElementById('lightboxCounter').textContent = '';
   document.getElementById('lightboxPrev').disabled = true;
   document.getElementById('lightboxNext').disabled = true;
   lightboxIndex = -1;
-  lb.classList.add('open');
-  document.body.style.overflow = 'hidden';
+  lightboxItem = null;
+  for (const id of ['lightboxChat', 'lightboxDel']) document.getElementById(id).hidden = true;
+  document.getElementById('lightboxCopy').hidden = !prompt;
+  activateLightbox();
 }
 
 async function toggleChatHistory() {
@@ -144,15 +155,17 @@ function initChat() {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); sendChatTurn(); }
   });
   document.getElementById('chatMessages').addEventListener('click', (e) => {
-    const img = e.target.closest('.chat-img-card img');
-    if (img) { openChatImage(img.src); return; }
+    const imageBtn = e.target.closest('.chat-image-open');
+    if (imageBtn) {
+      const turn = activeConv?.turns[Number(imageBtn.dataset.chatImageIdx)];
+      const img = imageBtn.querySelector('img');
+      if (img) openChatImage(img.src, imageBtn.dataset.filename, turn?.prompt || '');
+      return;
+    }
     const copyBtn = e.target.closest('[data-chat-copy-idx]');
     if (copyBtn && activeConv) {
       const t = activeConv.turns[parseInt(copyBtn.dataset.chatCopyIdx)];
-      if (t) navigator.clipboard.writeText(t.prompt).then(() => {
-        const orig = copyBtn.textContent; copyBtn.textContent = '已複製';
-        setTimeout(() => copyBtn.textContent = orig, 1500);
-      });
+      if (t) copyText(copyBtn, t.prompt);
     }
   });
   document.getElementById('chatHistPanel').addEventListener('click', async (e) => {
@@ -170,9 +183,16 @@ function initChat() {
     if (chatBusy || chatDeleting) return;
     const item = e.target.closest('[data-conv-id]');
     if (!item) return;
-    const conv = await loadConversation(parseInt(item.dataset.convId));
-    if (conv) { activeConv = conv; renderChat(); }
-    closeChatHistory();
+    const version = ++chatNavigationVersion;
+    try {
+      const conv = await loadConversation(Number(item.dataset.convId));
+      if (version !== chatNavigationVersion) return;
+      if (conv) { activeConv = conv; renderChat(); }
+      closeChatHistory();
+    } catch (e) {
+      console.error('loadConversation failed:', e);
+      if (version === chatNavigationVersion) showChatStatus('無法載入對話，請重試', true);
+    }
   });
   document.addEventListener('click', (e) => {
     const panel = document.getElementById('chatHistPanel');

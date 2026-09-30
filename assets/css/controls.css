@@ -1,6 +1,7 @@
 /* Tabs */
 .tabs { display: flex; gap: 6px; margin-bottom: 24px; border-bottom: 1px solid var(--border); }
 .tab {
+  font-family: inherit; background: transparent; border: 0;
   padding: 10px 20px; cursor: pointer; color: var(--text-tertiary);
   font-weight: 600; font-size: 14px;
   border-bottom: 3px solid transparent; margin-bottom: -1px;

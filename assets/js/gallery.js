@@ -1,6 +1,9 @@
 // Gallery rendering, filtering, lightbox and gallery interactions. Uses storage.js and utils.js.
 
 function invalidateGalleryCache(historyId) {
+  // Invalidate pending file reads as well as URLs that have already been cached.
+  galleryRenderVersion++;
+  if (lightboxItem?.historyId === historyId) closeLightbox();
   const prefix = `${historyId}_`;
   for (const [key, url] of blobUrlCache) {
     if (!key.startsWith(prefix)) continue;
@@ -13,7 +16,8 @@ async function renderGallery() {
   // Renders overlap (new image, resize, filter, delete); only the latest may touch the
   // cache or the DOM, otherwise cards duplicate and data-*-idx point at the wrong image.
   const version = ++galleryRenderVersion;
-  const isStale = () => version !== galleryRenderVersion;
+  const directory = dirHandle;
+  const isStale = () => version !== galleryRenderVersion || directory !== dirHandle;
   const list = await loadHistory();
   if (isStale()) return;
   const grid = document.getElementById('galleryGrid');
@@ -65,8 +69,9 @@ async function renderGallery() {
       const batch = toLoad.slice(i, i + BATCH_SIZE);
       await Promise.all(batch.map(async (entry) => {
         try {
-          const fh = await dirHandle.getFileHandle(entry.fname);
+          const fh = await directory.getFileHandle(entry.fname);
           const file = await fh.getFile();
+          if (isStale() || blobUrlCache.has(entry.fname)) return;
           blobUrlCache.set(entry.fname, URL.createObjectURL(file));
         } catch (e) {
           console.warn('gallery: cannot read local file', entry.fname, e);
@@ -101,13 +106,8 @@ async function renderGallery() {
     if (entry.b64) entry.src = blobUrlCache.get(entry.fname) || '';
   }
 
-  function getColCount() {
-    const w = window.innerWidth;
-    if (w >= 1800) return 4;
-    if (w >= 1400) return 3;
-    return 2;
-  }
-  const colCount = getColCount();
+  const colCount = getGalleryColumnCount();
+  galleryColumns = colCount;
   grid.innerHTML = '';
   galleryFlatList = [];
   const cols = [];
@@ -129,7 +129,9 @@ async function renderGallery() {
     div.setAttribute('role', 'button');
     div.setAttribute('aria-label', entry.prompt);
     div.onclick = (e) => { if (e.target.closest('button, a')) return; openLightbox(idx); };
-    div.onkeydown = (e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); div.click(); } };
+    div.onkeydown = (e) => {
+      if (e.target === div && (e.key === 'Enter' || e.key === ' ')) { e.preventDefault(); div.click(); }
+    };
     div.innerHTML = `<img src="${safeSrc}" alt="" loading="lazy">
       <div class="gallery-overlay">
         <div class="prompt-preview">${escapeHtml(entry.prompt)}</div>
@@ -148,7 +150,18 @@ async function renderGallery() {
   const total = galleryFlatList.length;
   empty.style.display = total ? 'none' : '';
   countEl.textContent = total ? `${total} 張` : '';
+  if (lightboxItem) {
+    const index = galleryFlatList.findIndex(item => item.historyId === lightboxItem.historyId
+      && item.filename === lightboxItem.filename);
+    if (index < 0) closeLightbox();
+    else showLightboxItem(index);
+  }
   updateStorageUsage();
+}
+
+function getGalleryColumnCount() {
+  const width = window.innerWidth;
+  return width >= 1800 ? 4 : width >= 1400 ? 3 : width <= 480 ? 1 : 2;
 }
 
 function filterGallery(type, btn) {
@@ -168,6 +181,8 @@ function showLightboxItem(idx) {
   const item = galleryFlatList[idx];
   if (!item) return;
   lightboxIndex = idx;
+  lightboxItem = item;
+  for (const id of ['lightboxChat', 'lightboxCopy', 'lightboxDel']) document.getElementById(id).hidden = false;
   const promptEl = document.getElementById('lightboxPrompt');
   promptEl.classList.remove('expanded');
   document.getElementById('lightboxImg').src = item.src;
@@ -180,8 +195,14 @@ function showLightboxItem(idx) {
 }
 
 function openLightbox(idx) {
+  if (!galleryFlatList[idx]) return;
   showLightboxItem(idx);
+  activateLightbox();
+}
+
+function activateLightbox() {
   const lb = document.getElementById('lightbox');
+  if (!lb.classList.contains('open')) lightboxReturnFocus = document.activeElement;
   lb.classList.add('open');
   lb.setAttribute('role', 'dialog');
   lb.setAttribute('aria-modal', 'true');
@@ -190,6 +211,7 @@ function openLightbox(idx) {
 }
 
 function lightboxNav(dir) {
+  if (!lightboxItem) return;
   const next = lightboxIndex + dir;
   if (next >= 0 && next < galleryFlatList.length) showLightboxItem(next);
 }
@@ -197,38 +219,41 @@ function lightboxNav(dir) {
 function closeLightbox() {
   document.getElementById('lightbox').classList.remove('open');
   document.body.style.overflow = '';
+  lightboxIndex = -1;
+  lightboxItem = null;
+  if (lightboxReturnFocus?.isConnected) lightboxReturnFocus.focus();
+  lightboxReturnFocus = null;
 }
 
 function copyPrompt() {
   const text = document.getElementById('lightboxPrompt').textContent;
-  navigator.clipboard.writeText(text).then(() => {
-    const btn = document.getElementById('lightboxCopy');
-    btn.textContent = '已複製';
-    setTimeout(() => btn.textContent = '複製提示詞', 1500);
-  });
+  return copyText(document.getElementById('lightboxCopy'), text);
 }
 
-function copyText(btn, text) {
-  navigator.clipboard.writeText(text).then(() => {
+async function copyText(btn, text) {
+  try {
+    if (!navigator.clipboard) throw new Error('Clipboard unavailable');
+    await navigator.clipboard.writeText(text);
+    const original = btn.textContent;
     btn.textContent = '已複製';
-    setTimeout(() => btn.textContent = '複製 Prompt', 1500);
-  });
+    setTimeout(() => btn.textContent = original, 1500);
+  } catch (error) {
+    console.warn('Cannot copy prompt:', error);
+    showError('無法存取剪貼簿，請手動選取並複製提示詞');
+  }
 }
 
 async function deleteLightboxImage() {
-  const item = galleryFlatList[lightboxIndex];
+  const item = lightboxItem;
   if (!item) return;
   await deleteSingleImage(item.historyId, item.imageIndex);
-  if (galleryFlatList.length === 0) { closeLightbox(); return; }
-  const next = Math.min(lightboxIndex, galleryFlatList.length - 1);
-  showLightboxItem(next);
 }
 
 function initGallery() {
   window.addEventListener('resize', () => {
     clearTimeout(galleryResizeTimer);
     galleryResizeTimer = setTimeout(() => {
-      if (currentView === 'gallery') renderGallery();
+      if (currentView === 'gallery' && galleryColumns !== getGalleryColumnCount()) renderGallery();
     }, 200);
   });
 
@@ -258,11 +283,12 @@ function initGallery() {
   document.addEventListener('keydown', e => {
     const lb = document.getElementById('lightbox');
     if (!lb.classList.contains('open')) return;
-    if (e.key === 'Escape') { closeLightbox(); return; }
+    if (e.key === 'Escape') { e.preventDefault(); closeLightbox(); return; }
     if (e.key === 'ArrowLeft') { lightboxNav(-1); return; }
     if (e.key === 'ArrowRight') { lightboxNav(1); return; }
     if (e.key === 'Tab') {
-      const focusable = lb.querySelectorAll('button, a[href], [tabindex]:not([tabindex="-1"])');
+      const focusable = [...lb.querySelectorAll('button, a[href], [tabindex]:not([tabindex="-1"])')]
+        .filter(el => !el.disabled && !el.hidden);
       if (!focusable.length) return;
       const first = focusable[0], last = focusable[focusable.length - 1];
       if (e.shiftKey) {

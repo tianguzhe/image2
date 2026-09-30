@@ -143,6 +143,15 @@ test('HTTP errors surface the API error message and code instead of raw JSON', a
   await assert.rejects(h.ctx.callEditAPI(new FormData()), { message: expected });
 });
 
+test('proxy authentication errors at the JSON root expose their message and code', () => {
+  const h = harness();
+  assert.equal(h.ctx.httpErrorMessage(401, JSON.stringify({
+    code: 'API_KEY_REQUIRED', message: 'API key is required in Authorization header',
+  })), 'HTTP 401: API key is required in Authorization header (API_KEY_REQUIRED)');
+  assert.equal(h.ctx.httpErrorMessage(502, '{"error":"upstream unavailable"}'), 'HTTP 502: upstream unavailable');
+  assert.equal(h.ctx.httpErrorMessage(502, 'null'), 'HTTP 502: null');
+});
+
 test('an edit upload that never reaches the server is explained like a failed fetch', async () => {
   const h = harness();
   h.ctx.getBaseUrl = () => 'https://example.test/v1';
@@ -155,4 +164,79 @@ test('an edit upload that never reaches the server is explained like a failed fe
   };
   const error = await h.ctx.callEditAPI(new FormData()).catch(e => e);
   assert.match(h.ctx.explainFetchFailure(error), /CORS/);
+});
+
+for (const terminal of ['error', 'done']) {
+  test(`SSE ${terminal} events settle without waiting for the upstream connection to close`, async () => {
+    const h = harness();
+    let cancelled = false;
+    const text = terminal === 'error'
+      ? 'event: error\ndata: {"message":"upstream failed"}\n\n'
+      : 'data: {"data":[{"b64_json":"first"},{"b64_json":"second"}]}\n\ndata: [DONE]\n\n';
+    const body = new ReadableStream({
+      start(controller) { controller.enqueue(new TextEncoder().encode(text)); },
+      pull() { throw new Error('read past terminal event'); },
+      cancel() { cancelled = true; },
+    }, { highWaterMark: 0 });
+    if (terminal === 'error') await assert.rejects(h.ctx.readImageEventStream({ body }), /upstream failed/);
+    else {
+      const result = await h.ctx.readImageEventStream({ body });
+      assert.deepEqual(JSON.parse(JSON.stringify(result)), { data: [{ b64_json: 'first' }, { b64_json: 'second' }] });
+    }
+    assert.equal(cancelled, true);
+    assert.equal(body.locked, false);
+  });
+}
+
+test('SSE parses multiline JSON, bare CR and split UTF-8, including an unterminated final event', async () => {
+  const h = harness();
+  const text = ': 心跳\r\revent: image_generation.partial_image\rdata: {"b64_json":\rdata: "預覽"}\r\r' +
+    'data: null\r\rdata: invalid json\r\rdata: {"type":"image_generation.completed","b64_json":"完成"}';
+  const bytes = new TextEncoder().encode(text);
+  const partials = [];
+  const body = new ReadableStream({ start(controller) {
+    for (const byte of bytes) controller.enqueue(Uint8Array.of(byte));
+    controller.close();
+  } });
+  const result = await h.ctx.readImageEventStream({ body }, value => partials.push(value));
+  assert.deepEqual(partials, ['預覽']);
+  assert.equal(result.data[0].b64_json, '完成');
+  assert.equal(body.locked, false);
+});
+
+test('standalone streaming requests time out while reading the response and clean up the timer', async () => {
+  const h = harness();
+  const reading = deferred();
+  let timeout, cleared = false, signal;
+  h.ctx.setTimeout = fn => { timeout = fn; return 1; };
+  h.ctx.clearTimeout = () => { cleared = true; };
+  h.ctx.getBaseUrl = () => 'https://example.test/v1';
+  h.ctx.fetch = async (url, options) => {
+    signal = options.signal;
+    return { ok: true, headers: { get: () => 'application/json' }, json() {
+      reading.resolve();
+      return new Promise((resolve, reject) => signal.addEventListener('abort', () => reject(signal.reason), { once: true }));
+    } };
+  };
+  const request = h.ctx.callGenerateAPIStream({ stream: true });
+  await reading.promise;
+  assert.equal(cleared, false);
+  timeout();
+  await assert.rejects(request, /請求超時/);
+  assert.equal(signal.aborted, true);
+  assert.equal(cleared, true);
+});
+
+test('a preview callback failure cancels and unlocks the underlying stream', async () => {
+  const h = harness();
+  let cancelled = false;
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(new TextEncoder().encode('data: {"type":"partial","b64_json":"preview"}\n\n'));
+    },
+    cancel() { cancelled = true; },
+  });
+  await assert.rejects(h.ctx.readImageEventStream({ body }, () => { throw new Error('preview failed'); }), /preview failed/);
+  assert.equal(cancelled, true);
+  assert.equal(body.locked, false);
 });

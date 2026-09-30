@@ -4,3 +4,4 @@ require('./cases/storage.cjs');
 require('./cases/api.cjs');
 require('./cases/editor.cjs');
 require('./cases/chat.cjs');
+require('./cases/reliability.cjs');

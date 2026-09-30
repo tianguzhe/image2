@@ -13,9 +13,13 @@ async function turnImageSrc(turn) {
     const fname = turn.filenames[0];
     if (chatBlobCache.has(fname)) return chatBlobCache.get(fname);
     if (useLocalFS && dirHandle) {
+      const directory = dirHandle;
+      const version = chatCacheVersion;
       try {
-        const fh = await dirHandle.getFileHandle(fname);
+        const fh = await directory.getFileHandle(fname);
         const file = await fh.getFile();
+        if (directory !== dirHandle || version !== chatCacheVersion) return '';
+        if (chatBlobCache.has(fname)) return chatBlobCache.get(fname);
         const url = URL.createObjectURL(file);
         chatBlobCache.set(fname, url);
         return url;
@@ -46,60 +50,78 @@ function latestImageTurn(conv) {
 }
 
 function newConversation() {
-  if (currentView !== 'chat') switchView('chat');
   activeConv = null;
+  switchView('chat', false);
   closeChatHistory();
-  renderChat();
+  showChatStatus('');
   document.getElementById('chatInput').focus();
 }
 
 async function loadActiveConversation() {
+  const version = ++chatNavigationVersion;
   const list = await loadConversations();
+  if (version !== chatNavigationVersion) return;
   activeConv = list.length ? list[0] : null;
   renderChat();
 }
 
 async function startChatFromImage(item) {
+  if (!storageAvailable()) return;
   if (!item || !item.src) return;
-  const extOf = (item.filename || '').split('.').pop().toLowerCase();
-  const fmt = extOf === 'jpg' ? 'jpeg' : (extOf === 'webp' ? 'webp' : 'png');
-  const now = Date.now();
-  const time = new Date().toLocaleString('zh-TW');
-  // The seed turn owns its own copy of the picked image so it survives independently
-  // of the gallery item (which the user may later delete).
-  let images = null, filenames = null;
+  storageActivity++;
   try {
-    if (useLocalFS && dirHandle) {
-      const file = await srcToFile(item.src, fmt);
-      const ext = imageExtension(fmt);
-      const fname = `conv_${now}_0_0.${ext}`;
-      await writeLocalFile(fname, file);
-      filenames = [fname];
-    } else {
-      const resp = await fetch(item.src);
-      const blob = await resp.blob();
-      images = [{ b64_json: await blobToBase64(blob) }];
+    const version = ++chatNavigationVersion;
+    const extOf = (item.filename || '').split('.').pop().toLowerCase();
+    const fmt = extOf === 'jpg' ? 'jpeg' : (extOf === 'webp' ? 'webp' : 'png');
+    const now = nextRecordId();
+    const time = new Date().toLocaleString('zh-TW');
+    // The seed turn owns its own copy of the picked image so it survives independently
+    // of the gallery item (which the user may later delete).
+    let images = null, filenames = null;
+    try {
+      if (useLocalFS && dirHandle) {
+        const file = await srcToFile(item.src, fmt);
+        const ext = imageExtension(fmt);
+        const fname = `conv_${now}_0_0.${ext}`;
+        await writeLocalFile(fname, file);
+        filenames = [fname];
+      } else {
+        const blob = await fetchImageBlob(item.src);
+        images = [{ b64_json: await blobToBase64(blob) }];
+      }
+    } catch (e) {
+      console.error('startChatFromImage seed failed:', e);
+      if (version !== chatNavigationVersion) return;
+      switchView('chat');
+      showChatStatus('無法載入起點圖片', true);
+      return;
     }
-  } catch (e) {
-    console.error('startChatFromImage seed failed:', e);
+    if (version !== chatNavigationVersion) return;
+    const conversation = {
+      id: now, title: (item.prompt || '對話微調').slice(0, 24), time,
+      createdAt: now, updatedAt: now,
+      turns: [{ kind: 'seed', prompt: item.prompt || '', images, filenames, fmt, time }]
+    };
+    try {
+      await saveConversation(conversation);
+    } catch (e) {
+      console.error('startChatFromImage save failed:', e);
+      if (version === chatNavigationVersion) showError('無法儲存起點圖片對話，請重試');
+      return;
+    }
+    if (version !== chatNavigationVersion) return;
+    activeConv = conversation;
+    closeLightbox();
     switchView('chat');
-    showChatStatus('無法載入起點圖片', true);
-    return;
+    showChatStatus('');
+    document.getElementById('chatInput').focus();
+  } finally {
+    storageActivity--;
   }
-  activeConv = {
-    id: now, title: (item.prompt || '對話微調').slice(0, 24), time,
-    createdAt: now, updatedAt: now,
-    turns: [{ kind: 'seed', prompt: item.prompt || '', images, filenames, fmt, time }]
-  };
-  await saveConversation(activeConv);
-  closeLightbox();
-  switchView('chat');
-  showChatStatus('');
-  document.getElementById('chatInput').focus();
 }
 
 function startChatFromLightbox() {
-  const item = galleryFlatList[lightboxIndex];
+  const item = lightboxItem;
   if (item) startChatFromImage(item);
 }
 
@@ -109,6 +131,7 @@ async function deleteActiveConversation() {
 }
 
 async function deleteChatHistoryItem(id) {
+  if (!storageAvailable()) return;
   if (chatDeleting) return;
   if (chatBusy) {
     showChatStatus('請先停止生成，再刪除對話', true);
@@ -135,6 +158,7 @@ async function deleteChatHistoryItem(id) {
 }
 
 async function sendChatTurn() {
+  if (!storageAvailable()) return;
   if (chatBusy || chatDeleting) return;
   const input = document.getElementById('chatInput');
   const prompt = input.value.trim();
@@ -155,6 +179,8 @@ async function sendChatTurn() {
   const background = document.getElementById(ids.background).value;
   // Same streaming preference as the generate tab
   const partials = getPartialImageCount();
+  // Starting a request makes this conversation the explicit current selection.
+  chatNavigationVersion++;
   chatBusy = true;
   chatUserStopped = false;
   chatController = new AbortController();
@@ -165,7 +191,7 @@ async function sendChatTurn() {
   const now = Date.now();
   if (!activeConv) {
     const time = new Date().toLocaleString('zh-TW');
-    activeConv = { id: now, title: prompt.slice(0, 24), time, createdAt: now, updatedAt: now, turns: [] };
+    activeConv = { id: nextRecordId(), title: prompt.slice(0, 24), time, createdAt: now, updatedAt: now, turns: [] };
   }
   // The request belongs to this conversation even if the user opens a new one.
   const conversation = activeConv;
@@ -184,7 +210,7 @@ async function sendChatTurn() {
       showChatStatus('微調中...');
       const src = await turnImageSrc(seedTurn);
       if (!src) throw new Error('找不到可用的輸入圖片');
-      const file = await srcToFile(src, seedTurn.fmt || 'png');
+      const file = await srcToFile(src, seedTurn.fmt || 'png', chatController.signal);
       const formData = new FormData();
       formData.append('model', IMAGE_MODEL);
       formData.append('prompt', `${prompt}\n\n${CHAT_EDIT_CONSTRAINT}`);
@@ -217,6 +243,9 @@ async function sendChatTurn() {
       throw new Error('回應中沒有圖片資料');
     }
     const images = data.data;
+    clearTimeout(timeoutId);
+    sendBtn.disabled = true;
+    if (activeConv === conversation) showChatStatus('儲存中...');
     const turnIdx = conversation.turns.length;
     const filenames = await persistTurnImages(conversation.id, turnIdx, images, fmt);
     conversation.turns.push({

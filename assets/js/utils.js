@@ -31,7 +31,11 @@ function imageMimeType(fmt) {
 }
 
 function base64ToBytes(b64) {
-  return Uint8Array.from(atob(b64), c => c.charCodeAt(0));
+  if (typeof Uint8Array.fromBase64 === 'function') return Uint8Array.fromBase64(b64);
+  const binary = atob(b64);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return bytes;
 }
 
 function b64ToObjectUrl(b64, mime) {
@@ -54,9 +58,30 @@ function blobToBase64(blob) {
   });
 }
 
-async function srcToFile(src, fmt) {
-  const resp = await fetch(src);
-  const blob = await resp.blob();
+async function fetchImageBlob(src, signal) {
+  const url = sanitizeUrl(src);
+  if (!url) throw new Error('圖片網址無效');
+  const controller = signal ? null : new AbortController();
+  const timeout = controller ? setTimeout(() => controller.abort(), API_TIMEOUT_MS) : null;
+  try {
+    const response = await fetch(url, { signal: signal || controller.signal });
+    if (!response.ok) throw new Error(`圖片下載失敗（HTTP ${response.status}）`);
+    const blob = await response.blob();
+    if (!blob.size) throw new Error('圖片內容為空');
+    if (blob.type && !blob.type.startsWith('image/') && blob.type !== 'application/octet-stream') {
+      throw new Error('下載內容不是圖片');
+    }
+    return blob;
+  } catch (error) {
+    if (controller?.signal.aborted) throw new Error('圖片下載超時（超過5分鐘），請稍後重試');
+    throw error;
+  } finally {
+    if (timeout !== null) clearTimeout(timeout);
+  }
+}
+
+async function srcToFile(src, fmt, signal) {
+  const blob = await fetchImageBlob(src, signal);
   const ext = imageExtension(fmt);
-  return new File([blob], `input.${ext}`, { type: blob.type || 'image/png' });
+  return new File([blob], `input.${ext}`, { type: blob.type || imageMimeType(fmt) });
 }

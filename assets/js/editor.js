@@ -165,6 +165,7 @@ function showStreamPartial(b64, fmt) {
 }
 
 async function generate() {
+  if (!storageAvailable()) return;
   if (genController) return; // already in flight (keyboard shortcut can re-enter)
   const prompt = document.getElementById('prompt').value.trim();
   if (!prompt) { alert('請輸入提示詞'); return; }
@@ -224,8 +225,12 @@ async function generate() {
     if (!data || !Array.isArray(data.data) || !data.data.length) {
       throw new Error('回應中沒有圖片資料');
     }
-    document.getElementById('status').textContent = '完成';
-    addToHistory('generate', prompt, data.data, fmt);
+    clearTimeout(timeoutId);
+    stopBtn.style.display = 'none';
+    showLoading('儲存中...');
+    if (await addToHistory('generate', prompt, data.data, fmt)) {
+      document.getElementById('status').textContent = '完成';
+    }
   } catch (e) {
     if (e.name === 'AbortError') {
       if (genUserStopped) document.getElementById('status').textContent = '已停止';
@@ -244,6 +249,7 @@ async function generate() {
 }
 
 async function editImage() {
+  if (!storageAvailable()) return;
   const btn = document.getElementById('editBtn');
   if (btn.disabled) return;
   const prompt = document.getElementById('editPrompt').value.trim();
@@ -255,9 +261,12 @@ async function editImage() {
   const background = document.getElementById('editBackground').value;
   const fmt = document.getElementById('editFormat').value;
   if (!checkBackgroundFormat(background, fmt)) return;
-  if (maskFiles.length) {
+  // The user may replace uploads while mask validation awaits image decoding.
+  const files = [...editFiles];
+  const mask = maskFiles[0];
+  if (mask) {
     btn.disabled = true;
-    const problem = await maskProblem(maskFiles[0], editFiles[0]);
+    const problem = await maskProblem(mask, files[0]);
     btn.disabled = false;
     if (problem) { alert('遮罩不符合要求：' + problem); return; }
   }
@@ -273,8 +282,8 @@ async function editImage() {
     formData.append('output_format', fmt);
     formData.append('output_compression', document.getElementById('editCompression').value);
   }
-  for (const f of editFiles) formData.append('image[]', f);
-  if (maskFiles.length) formData.append('mask', maskFiles[0]);
+  for (const f of files) formData.append('image[]', f);
+  if (mask) formData.append('mask', mask);
 
   const base = requireBaseUrl();
   if (!base) return;
@@ -296,8 +305,11 @@ async function editImage() {
     if (!data || !Array.isArray(data.data) || !data.data.length) {
       throw new Error('回應中沒有圖片資料');
     }
-    document.getElementById('status').textContent = '完成';
-    addToHistory('edit', prompt, data.data, fmt);
+    stopBtn.style.display = 'none';
+    showLoading('儲存中...');
+    if (await addToHistory('edit', prompt, data.data, fmt)) {
+      document.getElementById('status').textContent = '完成';
+    }
   } catch (e) {
     // Only stopEdit() aborts this signal; XHR timeouts reject with their own message.
     if (e.name === 'AbortError') document.getElementById('status').textContent = '已停止';
@@ -323,7 +335,7 @@ function initEditor() {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') { e.preventDefault(); editImage(); }
   });
   document.addEventListener('keydown', (e) => {
-    if (e.key !== 'Escape') return;
+    if (e.defaultPrevented || e.key !== 'Escape') return;
     if (document.getElementById('lightbox').classList.contains('open')) return;
     if (genController) stopGenerate();
     if (editController) stopEdit();

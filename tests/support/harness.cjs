@@ -3,6 +3,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');
+const crypto = require('node:crypto').webcrypto;
 
 const htmlPath = process.env.IMAGE_APP_HTML || path.join(__dirname, '..', '..', 'image_generator_optimized.html');
 const html = fs.readFileSync(htmlPath, 'utf8');
@@ -68,6 +69,7 @@ function harness() {
     return elements.get(id);
   };
   const directory = {
+    async isSameEntry(other) { return other === directory; },
     async getFileHandle(name) {
       return {
         async getFile() { return files.get(name); },
@@ -83,33 +85,45 @@ function harness() {
     async removeEntry(name) { files.delete(name); },
   };
   const db = {
-    transaction(storeName) {
-      if (!records.has(storeName)) records.set(storeName, new Map());
-      const store = records.get(storeName);
+    transaction(storeName, mode) {
+      const storeNames = Array.isArray(storeName) ? storeName : [storeName];
+      for (const name of storeNames) if (!records.has(name)) records.set(name, new Map());
+      const writes = [];
+      const error = mode === 'readwrite' ? db.failNextWrite : null;
+      if (error) db.failNextWrite = null;
+      let aborted = false;
       const tx = {
-        objectStore() {
+        error,
+        abort() { aborted = true; },
+        objectStore(name = storeNames[0]) {
+          const store = records.get(name);
+          const clone = value => name === 'settings' && value?.handle ? { ...value } : structuredClone(value);
           const request = result => {
             const req = { result };
             queueMicrotask(() => req.onsuccess?.());
             return req;
           };
           return {
-            add: value => store.set(value.id, structuredClone(value)),
-            put: value => store.set(value.id, structuredClone(value)),
-            delete: id => store.delete(id),
-            get: id => request(structuredClone(store.get(id))),
+            add: value => { const saved = clone(value); writes.push(() => store.set(value.id ?? value.key, saved)); },
+            put: value => { const saved = clone(value); writes.push(() => store.set(value.id ?? value.key, saved)); },
+            delete: id => writes.push(() => store.delete(id)),
+            get: id => request(clone(store.get(id))),
             getAll: () => request(structuredClone([...store.values()])),
             count: () => request(store.size),
           };
         },
       };
-      queueMicrotask(() => tx.oncomplete?.());
+      queueMicrotask(() => {
+        if (error || aborted) { tx.onabort?.(); return; }
+        writes.forEach(write => write());
+        tx.oncomplete?.();
+      });
       return tx;
     },
   };
   const ctx = vm.createContext({
     console: { error() {}, warn() {} },
-    Blob, File, FormData, TextDecoder, TextEncoder, ReadableStream, Event,
+    Blob, File, FormData, TextDecoder, TextEncoder, ReadableStream, Event, crypto,
     AbortController, atob, setTimeout, clearTimeout, setInterval, clearInterval, performance, queueMicrotask,
     URL: class extends URL {
       static createObjectURL(blob) {
@@ -122,6 +136,7 @@ function harness() {
     Date: class extends Date { static now() { return 100; } },
     document: Object.assign(new Element(), {
       getElementById: element, createElement: () => new Element(), createTextNode: text => ({ textContent: text }),
+      querySelector: element, querySelectorAll: () => [], body: new Element(),
     }),
     navigator: {},
     window: { addEventListener: (name, fn) => { if (name === 'beforeunload') unload.push(fn); } },
@@ -161,10 +176,11 @@ function harness() {
   `, ctx);
   const renderGallery = ctx.renderGallery;
   const renderChat = ctx.renderChat;
+  const openDB = ctx.openDB;
   ctx.openDB = async () => db;
   ctx.renderGallery = async () => {};
   ctx.renderChat = async () => {};
-  return { ctx, files, records, requests, createdUrls, revokedUrls, unload, alerts, element, directory, renderGallery, renderChat, settings };
+  return { ctx, files, records, requests, createdUrls, revokedUrls, unload, alerts, element, directory, renderGallery, renderChat, openDB, settings, db };
 }
 
 

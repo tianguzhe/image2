@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <meta name="description" content="墨境工坊 - GPT Image 視覺煉金實驗室，支援圖片生成、編輯和對話微調">
 <!-- 圖片微調使用 fetch() 讀取本地 blob: / data: 圖片，需由 connect-src 明確允許。 -->
-<meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: https:; connect-src 'self' blob: data: https:; script-src 'self' 'unsafe-inline';">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; base-uri 'none'; object-src 'none'; form-action 'none'; style-src 'self' 'unsafe-inline'; font-src 'self'; img-src 'self' data: blob: https: http://localhost:* http://127.0.0.1:* http://[::1]:*; connect-src 'self' blob: data: https: http://localhost:* http://127.0.0.1:* http://[::1]:*; script-src 'self' 'unsafe-inline';">
 <title>墨境 · GPT Image 實驗工坊</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><rect width='32' height='32' rx='7' fill='%23efe9dc'/><path d='M7 21c2.5-11 8.5-13 12.5-9.5 3.2 2.8 1.4 7.6-2.8 8.4-3.2.6-5.2-2-3.2-4.4' fill='none' stroke='%23211f1b' stroke-width='2.6' stroke-linecap='round' stroke-linejoin='round'/><rect x='19.5' y='19' width='8' height='8' rx='1.6' fill='%23b23a2e'/></svg>">
 <link rel="stylesheet" href="assets/css/base.css">
@@ -39,8 +39,8 @@
       </div>
 
       <div class="tabs">
-        <div class="tab active" onclick="switchTab('generate')">生成</div>
-        <div class="tab" onclick="switchTab('edit')">編輯</div>
+        <button type="button" class="tab active" onclick="switchTab('generate')">生成</button>
+        <button type="button" class="tab" onclick="switchTab('edit')">編輯</button>
       </div>
 
       <div id="tab-generate" class="tab-content active">
@@ -77,8 +77,8 @@
           </div>
         </div>
         <div class="form-group" id="customSizeGroup" style="display:none;">
-          <label for="customSize">自訂尺寸 <span class="hint">（寬x高，16 倍數，單邊 ≤3840，比例 ≤3:1；超過 2560×1440 為實驗性）</span></label>
-          <input type="text" id="customSize" placeholder="1280x720">
+          <label for="customSize">自訂尺寸 <span class="hint">（寬×高；支援範圍與實際輸出依服務商而定）</span></label>
+          <input type="text" id="customSize" placeholder="1580×996">
         </div>
         <div class="row">
           <div class="form-group">
@@ -171,8 +171,8 @@
           </div>
         </div>
         <div class="form-group" id="editCustomSizeGroup" style="display:none;">
-          <label for="editCustomSize">自訂尺寸 <span class="hint">（寬x高，16 倍數，單邊 ≤3840，比例 ≤3:1；超過 2560×1440 為實驗性）</span></label>
-          <input type="text" id="editCustomSize" placeholder="1280x720">
+          <label for="editCustomSize">自訂尺寸 <span class="hint">（寬×高；支援範圍與實際輸出依服務商而定）</span></label>
+          <input type="text" id="editCustomSize" placeholder="1580×996">
         </div>
         <div class="row">
           <div class="form-group">
@@ -203,7 +203,7 @@
         <div class="progress-bar" id="uploadProgress"><div class="progress-bar-fill" id="uploadProgressFill"></div></div>
       </div>
 
-      <div id="status" class="status"></div>
+      <div id="status" class="status" role="status" aria-live="polite"></div>
     </div>
   </div>
 
@@ -269,17 +269,17 @@
       </div>
       <div class="chat-messages" id="chatMessages"></div>
       <div class="chat-composer">
-        <textarea id="chatInput" rows="1" placeholder="一次只改一處，例如：只把背景換成海灘日落，其餘保持不變"></textarea>
+        <textarea id="chatInput" rows="1" aria-label="對話提示詞" placeholder="一次只改一處，例如：只把背景換成海灘日落，其餘保持不變"></textarea>
         <button id="chatSendBtn" class="chat-send" onclick="chatSendOrStop()">送出</button>
       </div>
-      <div class="chat-status" id="chatStatus"></div>
+      <div class="chat-status" id="chatStatus" role="status" aria-live="polite"></div>
     </div>
   </div>
 </div>
 
 <!-- Lightbox -->
-<div class="lightbox" id="lightbox" onclick="if(event.target===this)closeLightbox()">
-  <button class="lightbox-close" onclick="closeLightbox()">&times;</button>
+<div class="lightbox" id="lightbox" aria-label="圖片預覽" onclick="if(event.target===this)closeLightbox()">
+  <button class="lightbox-close" onclick="closeLightbox()" aria-label="關閉圖片預覽">&times;</button>
   <button class="lightbox-nav prev" id="lightboxPrev" onclick="lightboxNav(-1)" aria-label="上一張">&#8249;</button>
   <button class="lightbox-nav next" id="lightboxNext" onclick="lightboxNav(1)" aria-label="下一張">&#8250;</button>
   <div class="lightbox-wrap">

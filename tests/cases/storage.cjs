@@ -22,7 +22,8 @@ for (const fmt of ['png', 'jpeg', 'webp', undefined]) {
     assert.deepEqual(h.requests.map(item => item.url), ['https://example.test/image', 'https://example.test/image']);
     h.ctx.setStorage(false, null);
     await h.ctx.addToHistory('edit', 'next prompt', images, fmt);
-    assert.deepEqual(h.records.get('history').get(100).images, images);
+    assert.deepEqual(h.records.get('history').get(101).images, images);
+    assert.equal(h.records.get('history').size, 2);
     assert.equal(await h.ctx.persistTurnImages(200, 4, images, fmt), null);
   });
 }
@@ -40,7 +41,7 @@ test('history migration preserves metadata and remote/base64 image order', async
   });
 });
 
-test('backup import keeps its existing filesystem policy and original image indices', async () => {
+test('backup import preserves remote images and their original order in filesystem mode', async () => {
   const h = harness();
   h.ctx.setStorage(true, h.directory);
   const history = [{ id: 7, type: 'generate', prompt: 'import', fmt: 'webp', time: 'saved time',
@@ -48,8 +49,11 @@ test('backup import keeps its existing filesystem policy and original image indi
   const input = { value: 'backup.json', files: [{ text: async () => JSON.stringify({ settings: {}, history }) }] };
   await h.ctx.importAll(input);
   assert.equal(input.value, '');
-  assert.deepEqual(h.records.get('history').get(7).filenames, ['7_0.webp', '7_2.webp']);
-  assert.equal(h.requests.length, 0);
+  const names = h.records.get('history').get(7).filenames;
+  assert.equal(names.length, 3);
+  names.forEach((name, index) => assert.match(name, new RegExp(`^7_import_.+_${index}\\.webp$`)));
+  assert.equal(h.requests.length, 1);
+  assert.equal(await h.files.get(names[1]).text(), 'remote-image');
 });
 
 test('deleting a gallery image refreshes shifted cache entries and retains other records', async () => {
@@ -208,10 +212,10 @@ for (const useFS of [false, true]) {
     const saved = h.records.get('conversations').get(3);
     assert.equal(h.records.get('conversations').size, 1);
     if (useFS) {
-      assert.deepEqual(saved.turns[0].filenames, ['conv_3_0_0.webp']);
-      assert.deepEqual(saved.turns[2].filenames, ['conv_3_2_0.png']);
+      assert.match(saved.turns[0].filenames[0], /^conv_3_0_import_.+_0\.webp$/);
+      assert.match(saved.turns[2].filenames[0], /^conv_3_2_import_.+_0\.png$/);
       assert.equal(saved.turns[0].images, null);
-      assert.deepEqual(Buffer.from(h.files.get('conv_3_2_0.png')), Buffer.from(base64, 'base64'));
+      assert.deepEqual(Buffer.from(h.files.get(saved.turns[2].filenames[0])), Buffer.from(base64, 'base64'));
     } else {
       assert.deepEqual(saved.turns[0].images, [{ b64_json: base64 }]);
     }
@@ -249,4 +253,125 @@ test('deleting a conversation releases its cached image URLs', async () => {
   assert(h.revokedUrls.includes('blob:test/conv'));
   assert.equal(h.ctx.chatBlobCache.has('conv_1_0_0.png'), false);
   assert.equal(h.ctx.chatBlobCache.get('conv_2_0_0.png'), 'blob:test/other');
+});
+
+for (const removeRecord of [false, true]) {
+  test(`a stale filesystem read cannot overwrite or revive the gallery cache: deleted=${removeRecord}`, async () => {
+    const h = harness();
+    const firstRead = deferred();
+    const started = deferred();
+    let reads = 0;
+    h.ctx.setStorage(true, {
+      async getFileHandle() {
+        return { getFile() {
+          if (++reads === 1) { started.resolve(); return firstRead.promise; }
+          return new Blob(['replacement']);
+        } };
+      },
+    });
+    h.ctx.updateStorageUsage = async () => {};
+    let history = [{ id: 1, type: 'generate', prompt: 'p', filenames: ['1_0.png'] }];
+    h.ctx.loadHistory = async () => history;
+    const previous = h.renderGallery();
+    await started.promise;
+    h.ctx.invalidateGalleryCache(1);
+    if (removeRecord) history = [];
+    await h.renderGallery();
+    firstRead.resolve(new Blob(['stale']));
+    await previous;
+    assert.equal(h.createdUrls.length, removeRecord ? 0 : 1);
+    assert.equal(h.ctx.blobUrlCache.size, removeRecord ? 0 : 1);
+    if (!removeRecord) {
+      const entry = h.createdUrls.find(item => item.url === h.ctx.blobUrlCache.get('1_0.png'));
+      assert.equal(await entry.blob.text(), 'replacement');
+      assert.equal(h.ctx.galleryFlatList[0].src, entry.url);
+    }
+  });
+}
+
+test('failed remote downloads preserve the original history during migration', async () => {
+  const h = harness();
+  const original = { id: 9, type: 'generate', prompt: 'p', fmt: 'png', time: '',
+    images: [{ url: 'https://example.test/expired' }] };
+  h.records.set('history', new Map([[9, original]]));
+  h.ctx.setStorage(true, h.directory);
+  h.ctx.fetch = async () => ({ ok: false, status: 403, blob: async () => new Blob(['error page']) });
+  await h.ctx.migrateToFileSystem();
+  assert.deepEqual(h.records.get('history').get(9), original);
+  assert.equal(h.files.size, 0);
+  await assert.rejects(h.ctx.persistImages([{}], 'png', 'empty'), /圖片缺少/);
+});
+
+test('failed local writes abort the stream and retain the original error', async () => {
+  const h = harness();
+  const failure = new Error('disk full');
+  let aborted = false, closed = false;
+  h.ctx.setStorage(true, {
+    async getFileHandle() { return { async createWritable() { return {
+      async write() { throw failure; },
+      async close() { closed = true; },
+      async abort() { aborted = true; throw new Error('secondary failure'); },
+    }; } }; },
+  });
+  await assert.rejects(h.ctx.writeLocalFile('image.png', new Uint8Array()), error => error === failure);
+  assert.equal(aborted, true);
+  assert.equal(closed, false);
+});
+
+test('a batch of image writes keeps the directory selected when the batch started', async () => {
+  const h = harness();
+  const download = deferred();
+  const started = deferred();
+  h.ctx.setStorage(true, h.directory);
+  h.ctx.fetch = async () => { started.resolve(); return download.promise; };
+  const pending = h.ctx.persistImages([{ url: 'https://example.test/image' }, { b64_json: base64 }], 'png', 'batch');
+  await started.promise;
+  h.ctx.setStorage(true, { getFileHandle() { throw new Error('wrong directory'); } });
+  download.resolve({ ok: true, blob: async () => new Blob(['remote']) });
+  await pending;
+  assert.deepEqual([...h.files.keys()], ['batch_0.png', 'batch_1.png']);
+});
+
+test('database connections close for upgrades and reopen on the next operation', async () => {
+  const h = harness();
+  let opened = 0, closed = 0;
+  h.ctx.indexedDB = { open() {
+    opened++;
+    const req = { result: { close() { closed++; } } };
+    queueMicrotask(() => req.onsuccess());
+    return req;
+  } };
+  const first = await h.openDB();
+  assert.equal(await h.openDB(), first);
+  first.onversionchange();
+  assert.equal(closed, 1);
+  assert.notEqual(await h.openDB(), first);
+  assert.equal(opened, 2);
+});
+
+test('blocked database resets retain settings and wait for deletion before reloading', async () => {
+  const h = harness();
+  const blocked = deferred();
+  const errors = [];
+  let req, reloads = 0;
+  h.settings.set('gpt_image_baseurl', 'https://example.test/v1');
+  h.settings.set('gpt_image_history', '[{"id":1}]');
+  h.ctx.formSaveTimer = setTimeout(() => h.settings.set('gpt_image_form', '{}'), 1000);
+  h.ctx.showError = message => errors.push(message);
+  h.ctx.location = { reload() { reloads++; } };
+  h.ctx.indexedDB = { deleteDatabase() {
+    req = {};
+    queueMicrotask(() => { req.onblocked(); blocked.resolve(); });
+    return req;
+  } };
+  const reset = h.ctx.clearHistory();
+  await blocked.promise;
+  assert.equal(reloads, 0);
+  assert.equal(h.settings.size, 2);
+  assert.match(errors[0], /其他.*分頁/);
+  req.onsuccess();
+  await reset;
+  assert.equal(reloads, 1);
+  assert.equal(h.settings.size, 0);
+  assert.equal(h.ctx.formSaveTimer, null);
 });

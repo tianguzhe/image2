@@ -5,6 +5,10 @@ let useLocalFS = false;
 let dbPromise = null;
 const blobUrlCache = new Map();
 const chatBlobCache = new Map();
+let chatCacheVersion = 0;
+let storageMaintenance = false;
+let storageActivity = 0;
+let lastRecordId = 0;
 
 // Settings and gallery
 let formSaveTimer = null;
@@ -12,6 +16,9 @@ let currentGalleryFilter = 'all';
 let gallerySortAsc = false;
 let galleryFlatList = [];
 let lightboxIndex = -1;
+let lightboxItem = null;
+let lightboxReturnFocus = null;
+let galleryColumns = 0;
 let galleryResizeTimer = null;
 let galleryRenderVersion = 0;
 
@@ -32,3 +39,4 @@ let chatController = null;
 let chatUserStopped = false;
 let chatPartialUrl = null;
 let chatRenderVersion = 0;
+let chatNavigationVersion = 0;

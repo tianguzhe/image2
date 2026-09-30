@@ -1,28 +1,52 @@
 // Settings persistence and form controls. initSettings() runs after all feature files load.
 
+function readSetting(key, fallback = '') {
+  try { return localStorage.getItem(key) || fallback; }
+  catch (error) {
+    console.warn('Cannot read saved settings:', error);
+    return fallback;
+  }
+}
+
+function writeSetting(key, value) {
+  try { localStorage.setItem(key, value); }
+  catch (error) {
+    console.warn('Cannot save settings:', error);
+    showError('瀏覽器無法保存設定；目前輸入仍可使用，關閉頁面後需重新填寫');
+  }
+}
+
 function getBaseUrl() {
-  let url = baseUrlEl.value.trim();
-  if (!url) return '';
-  url = url.replace(/\/+$/, '');
-  // Forgiving normalization (borrowed from the SSE tester): a bare origin like
-  // https://api.openai.com gets /v1 appended; URLs that already carry a path
-  // (custom proxies) are left untouched.
+  return normalizeBaseUrl(baseUrlEl.value);
+}
+
+function normalizeBaseUrl(value) {
+  if (!value.trim()) return '';
   try {
-    const u = new URL(url);
-    if (u.pathname === '' || u.pathname === '/') url = u.origin + '/v1';
-  } catch {}
-  return url;
+    const u = new URL(value.trim());
+    const local = ['localhost', '127.0.0.1', '[::1]'].includes(u.hostname);
+    if (u.protocol !== 'https:' && !(local && u.protocol === 'http:')) throw new Error();
+    if (u.username || u.password || u.search || u.hash) throw new Error();
+    const path = u.pathname.replace(/\/+$/, '') || '/v1';
+    return u.origin + path;
+  } catch {
+    throw new Error('Base URL 須為 HTTPS（本機可用 HTTP），且不可包含帳密、查詢參數或片段');
+  }
 }
 
 function requireBaseUrl() {
-  const url = getBaseUrl();
-  if (!url) { alert('請先填寫 Base URL'); baseUrlEl.focus(); return ''; }
-  return url;
+  try {
+    const url = getBaseUrl();
+    if (url) return url;
+    alert('請先填寫 Base URL');
+  } catch (e) { alert(e.message); }
+  baseUrlEl.focus();
+  return '';
 }
 
 function loadFormState() {
   try {
-    const saved = JSON.parse(localStorage.getItem(PERSIST_KEY) || '{}');
+    const saved = JSON.parse(readSetting(PERSIST_KEY, '{}'));
     PERSIST_FIELDS.forEach(id => {
       if (saved[id] == null) return;
       const el = document.getElementById(id);
@@ -42,7 +66,7 @@ function persistFormState() {
     const el = document.getElementById(id);
     if (el) state[id] = el.value;
   });
-  localStorage.setItem(PERSIST_KEY, JSON.stringify(state));
+  writeSetting(PERSIST_KEY, JSON.stringify(state));
 }
 
 function saveFormState() {
@@ -54,21 +78,18 @@ function getSize(sizeId = 'size', customSizeId = 'customSize') {
   const v = document.getElementById(sizeId).value;
   if (v === 'custom') {
     const c = document.getElementById(customSizeId).value.trim();
-    if (!/^\d+x\d+$/.test(c)) { alert('自訂尺寸格式錯誤，請用 寬x高'); return null; }
-    const problem = customSizeProblem(...c.split('x').map(Number));
-    if (problem) { alert('自訂尺寸不符合模型限制：' + problem); return null; }
-    return c;
+    const match = /^(\d+)\s*[xX×]\s*(\d+)$/.exec(c);
+    if (!match) { alert('自訂尺寸格式錯誤，請用 寬x高，例如 1580×996'); return null; }
+    const [w, h] = match.slice(1).map(Number);
+    if (!Number.isSafeInteger(w) || !Number.isSafeInteger(h) || w <= 0 || h <= 0) {
+      alert('自訂尺寸的寬高須為有效的正整數');
+      return null;
+    }
+    // A configurable proxy may have different size rules from the official API.
+    // Preserve the requested dimensions and let the selected service validate them.
+    return `${w}x${h}`;
   }
   return v;
-}
-
-// GPT Image 2.5 custom resolution rules; the API rejects sizes outside them.
-function customSizeProblem(w, h) {
-  if (w % 16 || h % 16) return '寬高都必須是 16 的倍數';
-  if (Math.max(w, h) > 3840) return '單邊不可超過 3840';
-  if (Math.max(w, h) > Math.min(w, h) * 3) return '長短邊比例不可超過 3:1';
-  if (w * h < 655360 || w * h > 8294400) return '總像素須介於 655,360 與 8,294,400 之間';
-  return '';
 }
 
 // Transparency needs an alpha channel, which JPEG lacks.
@@ -118,14 +139,14 @@ const baseUrlEl = document.getElementById('baseUrl');
 const apiKeyEl = document.getElementById('apiKey');
 
 function initSettings() {
-  baseUrlEl.value = localStorage.getItem(BASEURL_KEY) || DEFAULT_BASE_URL;
+  baseUrlEl.value = readSetting(BASEURL_KEY, DEFAULT_BASE_URL);
   baseUrlEl.addEventListener('input', function() {
-    localStorage.setItem(BASEURL_KEY, this.value);
+    writeSetting(BASEURL_KEY, this.value);
   });
 
-  apiKeyEl.value = localStorage.getItem(APIKEY_KEY) || '';
+  apiKeyEl.value = readSetting(APIKEY_KEY);
   apiKeyEl.addEventListener('input', function() {
-    localStorage.setItem(APIKEY_KEY, this.value);
+    writeSetting(APIKEY_KEY, this.value);
   });
 
   // Flush a pending debounced write so the last keystrokes survive page close

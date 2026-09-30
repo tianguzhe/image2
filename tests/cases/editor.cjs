@@ -14,26 +14,33 @@ test('size validation retains standard, custom and invalid-input behavior', () =
   assert.equal(h.alerts.length, 1);
 });
 
-test('custom sizes follow the GPT Image 2.5 resolution constraints', () => {
+test('custom sizes preserve positive integer dimensions and leave service limits to the API', () => {
   const h = harness();
   h.element('size').value = 'custom';
-  for (const valid of ['1280x720', '3840x2160', '2160x3840', '2400x800', '1024x640']) {
+  for (const valid of ['1580x996', '1000x1000', '1280x720', '3840x2160', '2160x3840',
+    '4096x1024', '2448x800', '800x800', '3840x2400']) {
     h.element('customSize').value = valid;
     assert.equal(h.ctx.getSize(), valid, valid);
   }
   assert.equal(h.alerts.length, 0);
-  // Non-multiple of 16, edge > 3840, ratio > 3:1, too few pixels, too many pixels.
-  for (const invalid of ['1000x1000', '4096x1024', '2448x800', '800x800', '3840x2400']) {
+  for (const valid of ['1580\u200a×\u200a996', ' 1580 X 996 ', '01580x00996']) {
+    h.element('customSize').value = valid;
+    assert.equal(h.ctx.getSize(), '1580x996', valid);
+  }
+  assert.equal(h.alerts.length, 0);
+  const invalidSizes = ['0x996', '1580x0', '-1580x996', '1580.5x996', '1580x996px',
+    '1580xx996', '15 80x996', '9007199254740992x996', '1580x9007199254740993', '1e3x996'];
+  for (const invalid of invalidSizes) {
     h.element('customSize').value = invalid;
     assert.equal(h.ctx.getSize(), null, invalid);
   }
-  assert.equal(h.alerts.length, 5);
+  assert.equal(h.alerts.length, invalidSizes.length);
 });
 
 for (const streaming of [false, true]) {
   test(`generation retains model, format, size and streaming options: ${streaming}`, async () => {
     const h = harness();
-    const values = { prompt: ' prompt ', size: 'custom', customSize: '1024x1536', quality: 'high',
+    const values = { prompt: ' prompt ', size: 'custom', customSize: '1580\u200a×\u200a996', quality: 'high',
       background: 'auto', format: 'jpeg', compression: '85', partials: streaming ? '2' : '0' };
     for (const [id, value] of Object.entries(values)) h.element(id).value = value;
     h.ctx.requireBaseUrl = () => 'https://example.test/v1';
@@ -45,7 +52,7 @@ for (const streaming of [false, true]) {
     h.ctx.addToHistory = async (...args) => saved.push(args);
     await h.ctx.generate();
     assert.deepEqual(JSON.parse(JSON.stringify(request)), {
-      model: 'gpt-image-2.5-sunburst', prompt: 'prompt', n: 1, size: '1024x1536', quality: 'high',
+      model: 'gpt-image-2.5-sunburst', prompt: 'prompt', n: 1, size: '1580x996', quality: 'high',
       output_format: 'jpeg', output_compression: 85,
       ...(streaming ? { stream: true, partial_images: 2 } : {}),
     });
@@ -58,7 +65,7 @@ for (const streaming of [false, true]) {
 
 test('editing retains custom size, mask, image order and format options', async () => {
   const h = harness();
-  const values = { editPrompt: ' edit ', editSize: 'custom', editCustomSize: ' 1536x1024 ',
+  const values = { editPrompt: ' edit ', editSize: 'custom', editCustomSize: ' 1580 X 996 ',
     editQuality: 'high', editBackground: 'auto', editFormat: 'webp', editCompression: '90' };
   for (const [id, value] of Object.entries(values)) h.element(id).value = value;
   h.ctx.editFiles = [new File(['one'], 'one.png'), new File(['two'], 'two.png')];
@@ -72,7 +79,7 @@ test('editing retains custom size, mask, image order and format options', async 
   await h.ctx.editImage();
   assert.equal(form.get('model'), 'gpt-image-2.5-sunburst');
   assert.equal(form.get('prompt'), 'edit');
-  assert.equal(form.get('size'), '1536x1024');
+  assert.equal(form.get('size'), '1580x996');
   assert.equal(form.get('quality'), 'high');
   assert.equal(form.get('output_format'), 'webp');
   assert.equal(form.get('output_compression'), '90');
@@ -283,4 +290,77 @@ test('an in-flight edit can be stopped by the user', async () => {
   assert.equal(h.element('stopEditBtn').style.display, 'none');
   assert.equal(h.element('editBtn').disabled, false);
   assert.equal(h.ctx.editController, null);
+});
+
+for (const editing of [false, true]) {
+  for (const saveSucceeded of [false, true]) {
+    test(`submission stays busy until persistence settles: edit=${editing}, saved=${saveSucceeded}`, async () => {
+      const h = harness();
+      const saving = deferred();
+      const started = deferred();
+      const values = { prompt: 'p', size: 'auto', quality: 'auto', background: 'auto', format: 'png', partials: '0',
+        editPrompt: 'p', editSize: 'auto', editQuality: 'auto', editBackground: 'auto', editFormat: 'png' };
+      for (const [id, value] of Object.entries(values)) h.element(id).value = value;
+      h.ctx.editFiles = [new File(['input'], 'input.png')];
+      h.ctx.requireBaseUrl = () => 'https://example.test/v1';
+      h.ctx.hideStreamPreview = () => {};
+      let requests = 0;
+      h.ctx.callGenerateAPI = h.ctx.callEditAPI = async () => { requests++; return { data: [{ b64_json: base64 }] }; };
+      h.ctx.addToHistory = async () => {
+        started.resolve();
+        await saving.promise;
+        if (!saveSucceeded) h.element('status').textContent = 'save failed';
+        return saveSucceeded;
+      };
+      const submit = editing ? h.ctx.editImage : h.ctx.generate;
+      const button = h.element(editing ? 'editBtn' : 'generateBtn');
+      const pending = submit();
+      await started.promise;
+      assert.equal(button.disabled, true);
+      assert.equal(h.element(editing ? 'stopEditBtn' : 'stopGenBtn').style.display, 'none');
+      assert.notEqual(h.element('status').textContent, '完成');
+      await submit();
+      assert.equal(requests, 1);
+      saving.resolve();
+      await pending;
+      assert.equal(button.disabled, false);
+      assert.equal(h.element('status').textContent, saveSucceeded ? '完成' : 'save failed');
+    });
+  }
+}
+
+test('editing submits the same image and mask that passed asynchronous validation', async () => {
+  const h = harness();
+  const validation = deferred();
+  const image = new File(['original'], 'original.png');
+  const mask = new File(['mask'], 'mask.png');
+  h.ctx.editFiles = [image];
+  h.ctx.maskFiles = [mask];
+  for (const [id, value] of Object.entries({ editPrompt: 'p', editSize: 'auto', editFormat: 'png' })) h.element(id).value = value;
+  h.ctx.requireBaseUrl = () => 'https://example.test/v1';
+  h.ctx.maskProblem = (actualMask, actualImage) => {
+    assert.equal(actualMask, mask);
+    assert.equal(actualImage, image);
+    return validation.promise;
+  };
+  let sent;
+  h.ctx.callEditAPI = async form => { sent = form; return { data: [{ b64_json: base64 }] }; };
+  h.ctx.addToHistory = async () => true;
+  const pending = h.ctx.editImage();
+  h.ctx.editFiles.splice(0, 1, new File(['replacement'], 'replacement.png'));
+  h.ctx.maskFiles.length = 0;
+  validation.resolve('');
+  await pending;
+  assert.equal(sent.get('image[]'), image);
+  assert.equal(sent.get('mask'), mask);
+});
+
+test('image downloads reject HTTP errors, empty bodies and unsafe URL schemes', async () => {
+  const h = harness();
+  h.ctx.fetch = async () => ({ ok: false, status: 404, blob: async () => new Blob(['not found']) });
+  await assert.rejects(h.ctx.srcToFile('https://example.test/missing', 'png'), /HTTP 404/);
+  h.ctx.fetch = async () => ({ ok: true, blob: async () => new Blob() });
+  await assert.rejects(h.ctx.srcToFile('https://example.test/empty', 'png'), /內容為空/);
+  h.ctx.fetch = async () => { throw new Error('must not fetch'); };
+  await assert.rejects(h.ctx.srcToFile('javascript:alert(1)', 'png'), /網址無效/);
 });
