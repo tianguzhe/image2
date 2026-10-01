@@ -14,9 +14,6 @@ const MAX_B64_LENGTH = 50 * 1024 * 1024; // 50MB
 const MAX_IMAGES_PER_ITEM = 20;
 const BATCH_SIZE = 20;
 const IMAGE_MODEL = 'gpt-image-2.5-sunburst';
-// Appended to every chat edit: the prompting guide advises restating what must stay
-// unchanged on each iteration, since repeated edits drift otherwise.
-const CHAT_EDIT_CONSTRAINT = '只修改上述指令提到的部分；其餘構圖、主體、光線、風格保持不變；不要加入文字或浮水印。';
 
 // Edit input limits from the Images API reference: png/jpeg/webp, each < 50MB, up to 16 images.
 const EDIT_IMAGE_TYPES = ['image/png', 'image/jpeg', 'image/webp'];

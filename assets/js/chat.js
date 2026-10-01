@@ -213,7 +213,7 @@ async function sendChatTurn() {
       const file = await srcToFile(src, seedTurn.fmt || 'png', chatController.signal);
       const formData = new FormData();
       formData.append('model', IMAGE_MODEL);
-      formData.append('prompt', `${prompt}\n\n${CHAT_EDIT_CONSTRAINT}`);
+      formData.append('prompt', prompt);
       formData.append('n', '1');
       if (size !== 'auto') formData.append('size', size);
       if (quality !== 'auto') formData.append('quality', quality);

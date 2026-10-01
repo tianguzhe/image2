@@ -35,12 +35,11 @@ for (const hasSeed of [false, true]) {
         assert.equal(request.get('stream'), null);
         assert.equal(request.get('partial_images'), null);
         assert.equal(request.get('image[]').name, 'input.png');
-        // Chat edits reuse the edit tab settings and restate what must stay unchanged.
+        // Chat edits reuse the edit tab settings and send the user's prompt verbatim.
         assert.equal(request.get('size'), '996x1580');
         assert.equal(request.get('quality'), 'medium');
         assert.equal(request.get('background'), 'opaque');
-        assert.equal(request.get('prompt'),
-          'refine\n\n只修改上述指令提到的部分；其餘構圖、主體、光線、風格保持不變；不要加入文字或浮水印。');
+        assert.equal(request.get('prompt'), 'refine');
       } else {
         assert.equal(request.model, 'gpt-image-2.5-sunburst');
         assert.equal(request.prompt, 'refine');
